@@ -32,6 +32,7 @@ import { SymbolView } from "../../components/ui/AppSymbol";
 import { hasCloudPublicConfig } from "../cloud/publicConfig";
 import { CloudEnvironmentRows } from "./CloudEnvironmentRows";
 import { splitEnvironmentSections } from "./environmentSections";
+import { SshEnvironmentSection } from "./SshEnvironmentSection";
 
 type ConnectionsNewRouteParams = {
   readonly mode?: string;
@@ -162,14 +163,16 @@ export function ConnectionsNewRouteScreen({
         ? Haptics.NotificationFeedbackType.Success
         : Haptics.NotificationFeedbackType.Error,
     );
-    if (AsyncResult.isSuccess(result)) {
-      // Return to whatever opened the sheet. Replacing it with Home would
-      // nest Home inside any sheet still below it.
-      if (!navigation.canGoBack()) {
-        navigation.dispatch(StackActions.replace("Home"));
-      } else {
-        navigation.goBack();
-      }
+    if (AsyncResult.isSuccess(result)) close();
+  };
+
+  // Return to whatever opened the sheet. Replacing it with Home would nest
+  // Home inside any sheet still below it.
+  const close = () => {
+    if (!navigation.canGoBack()) {
+      navigation.dispatch(StackActions.replace("Home"));
+    } else {
+      navigation.goBack();
     }
   };
 
@@ -263,6 +266,8 @@ export function ConnectionsNewRouteScreen({
                 "For machines on your local network or tailnet. The machine keeps its own provider credentials."}
             </Text>
           </View>
+
+          <SshEnvironmentSection onConnected={close} />
 
           {hasCloudPublicConfig() ? <T3ConnectSection /> : null}
         </View>

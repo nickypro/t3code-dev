@@ -6,6 +6,7 @@ import { Platform, View } from "react-native";
 import { deriveProjectGroupLabel } from "@t3tools/client-runtime/state/project-grouping";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 
+import { sshNative } from "../../connection/ssh/native";
 import { hasCloudPublicConfig } from "../cloud/publicConfig";
 import { useAdaptiveWorkspaceLayout } from "../layout/AdaptiveWorkspaceLayout";
 import { NativeStackScreenOptions } from "../../native/StackHeader";
@@ -93,6 +94,9 @@ function ConfiguredSettingsRouteScreen() {
             target="SettingsEnvironments"
           />
           <SettingsRow icon="bell.badge" label="Notifications" target="SettingsNotifications" />
+          {sshNative === null ? null : (
+            <SettingsRow icon="terminal" label="SSH" target="SettingsSsh" />
+          )}
         </SettingsSection>
 
         <SettingsIndexSections />
@@ -125,6 +129,9 @@ function LocalSettingsRouteScreen() {
             valuePosition="trailing"
             target="SettingsEnvironments"
           />
+          {sshNative === null ? null : (
+            <SettingsRow icon="terminal" label="SSH" target="SettingsSsh" />
+          )}
         </SettingsSection>
 
         <SettingsIndexSections />

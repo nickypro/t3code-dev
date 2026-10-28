@@ -121,6 +121,7 @@ import { UsageLimitAccountScreen } from "./features/usage/UsageLimitsPooled";
 import { UsageRouteScreen } from "./features/usage/UsageRouteScreen";
 import { SettingsAboutRouteScreen } from "./features/settings/SettingsAboutRouteScreen";
 import { SettingsNotificationsRouteScreen } from "./features/settings/SettingsNotificationsRouteScreen";
+import { SettingsSshRouteScreen } from "./features/settings/SettingsSshRouteScreen";
 import { SettingsRouteScreen } from "./features/settings/SettingsRouteScreen";
 import { SettingsThreadsRouteScreen } from "./features/settings/SettingsThreadsRouteScreen";
 import { SettingsEnvironmentFilterProvider } from "./features/settings/settings-environment-filter";
@@ -267,6 +268,11 @@ const SettingsContentStack = createV5SheetStackNavigator({
       screen: SettingsNotificationsRouteScreen,
       linking: "notifications",
       options: { title: "Notifications" },
+    }),
+    SettingsSsh: createNativeStackScreen({
+      screen: SettingsSshRouteScreen,
+      linking: "ssh",
+      options: { title: "SSH" },
     }),
     SettingsThreads: createNativeStackScreen({
       screen: SettingsThreadsRouteScreen,
