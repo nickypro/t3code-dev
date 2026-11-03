@@ -1,0 +1,79 @@
+name: Self-host Mac build
+
+on:
+  push:
+    branches: [selfhost-builds]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  mac:
+    runs-on: macos-15
+    timeout-minutes: 90
+    env:
+      # Public T3 Connect config for the self-hosted relay.
+      T3CODE_RELAY_URL: https://relay.slop.ie
+      T3CODE_CLERK_PUBLISHABLE_KEY: pk_test_aG9uZXN0LW1hc3RpZmYtMzMzMS5jbGVyay5hY2NvdW50cy5kZXYk
+      T3CODE_CLERK_JWT_TEMPLATE: t3-relay
+      T3CODE_CLERK_CLI_OAUTH_CLIENT_ID: 5A7Df4BWpxL6FFTu
+    steps:
+      # Manual checkout: upstream has orphaned gitlinks under .repos that break actions/checkout.
+      - name: Checkout pingdotgg/t3code@v0.1.6
+        run: |
+          set -euo pipefail
+          git init .
+          git remote add origin https://github.com/pingdotgg/t3code.git
+          git fetch --no-tags --depth=1 origin refs/tags/v0.1.6
+          git sparse-checkout set --no-cone '/*' '!/.repos/'
+          git checkout --detach FETCH_HEAD
+          git log --oneline -1
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 26.12.1
+
+      - name: Install pnpm
+        run: npm install -g pnpm@12.14.0 && pnpm --version && node --version
+
+      - name: Write .env.local
+        run: |
+          set -euo pipefail
+          {
+            echo "T3CODE_RELAY_URL=$T3CODE_RELAY_URL"
+            echo "T3CODE_CLERK_PUBLISHABLE_KEY=$T3CODE_CLERK_PUBLISHABLE_KEY"
+            echo "T3CODE_CLERK_JWT_TEMPLATE=$T3CODE_CLERK_JWT_TEMPLATE"
+            echo "T3CODE_CLERK_CLI_OAUTH_CLIENT_ID=$T3CODE_CLERK_CLI_OAUTH_CLIENT_ID"
+          } > .env.local
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build unsigned arm64 dmg
+        env:
+          T3CODE_DESKTOP_SIGNED: "false"
+          CSC_IDENTITY_AUTO_DISCOVERY: "false"
+        run: |
+          set -euo pipefail
+          # GITHUB_* cannot be overridden via env:, so clear it here. An empty
+          # repository means no auto-update feed is baked into the app.
+          export GITHUB_REPOSITORY=""
+          unset T3CODE_DESKTOP_UPDATE_REPOSITORY || true
+          pnpm dist:desktop:dmg:arm64
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: t3code-selfhost-mac-arm64
+          path: release/*.dmg
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Check bundle points at the self-hosted relay
+        run: |
+          set -euo pipefail
+          ls -la release
+          grep -rl "relay.slop.ie" apps/desktop/dist-electron apps/server/dist | head -5
+          if find release -name app-update.yml | grep -q .; then
+            echo "::error::app-update.yml present, auto-update would be enabled"; find release -name app-update.yml -exec cat {} \;; exit 1
+          fi
