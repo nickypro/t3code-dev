@@ -50,6 +50,11 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
+      # The tag still carries 0.1.5 in package.json; upstream's release stamps
+      # the release version in before building, so do the same.
+      - name: Stamp version 0.1.6
+        run: node scripts/update-release-package-versions.ts 0.1.6 && git status --short
+
       - name: Build unsigned arm64 dmg
         env:
           T3CODE_DESKTOP_SIGNED: "false"
@@ -73,7 +78,8 @@ jobs:
         run: |
           set -euo pipefail
           ls -la release
-          grep -rl "relay.slop.ie" apps/desktop/dist-electron apps/server/dist | head -5
+          grep -rl "relay.slop.ie" apps/desktop/dist-electron apps/server/dist > /tmp/hits; head -5 /tmp/hits
+          ls release/*0.1.6*.dmg
           if find release -name app-update.yml | grep -q .; then
             echo "::error::app-update.yml present, auto-update would be enabled"; find release -name app-update.yml -exec cat {} \;; exit 1
           fi
