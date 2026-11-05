@@ -1,0 +1,225 @@
+From 18f64c7daf1a1383cb495ee1a43cbf30906051df Mon Sep 17 00:00:00 2001
+From: Nicky Pochinkov <work@nicky.pro>
+Date: Thu, 5 Nov 2026 12:39:50 +0000
+Subject: [PATCH] feat(server): offer a TLS client certificate on outbound
+ fetch
+
+Machines behind a client-certificate gate (self-hosted T3 Connect via
+t3gate) refuse peer links from servers that can't present one, so the
+desktop's built-in server couldn't link to them. If
+<T3 home>/client-cert/client.{crt,key} (or T3CODE_TLS_CLIENT_CERT/KEY)
+exist, install an HTTP/1.1 undici Agent that offers it.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ apps/server/src/binCli.ts            |  7 ++-
+ apps/server/src/outboundHttp.test.ts | 68 ++++++++++++++++++++++++++++
+ apps/server/src/outboundHttp.ts      | 47 +++++++++++++++++++
+ 3 files changed, 121 insertions(+), 1 deletion(-)
+
+diff --git a/apps/server/src/binCli.ts b/apps/server/src/binCli.ts
+index 7c136ae5..607a241b 100644
+--- a/apps/server/src/binCli.ts
++++ b/apps/server/src/binCli.ts
+@@ -15,7 +15,11 @@ import { appCommand } from "./cli/app.ts";
+ import { browserCommand } from "./cli/browser.ts";
+ import { pairCommand } from "./cli/pair.ts";
+ import { hasCloudPublicConfig } from "./cloud/publicConfig.ts";
+-import { extendConnectionAttemptTimeout, keepOutboundFetchOnHttp1 } from "./outboundHttp.ts";
++import {
++  extendConnectionAttemptTimeout,
++  keepOutboundFetchOnHttp1,
++  presentTlsClientCertificate,
++} from "./outboundHttp.ts";
+ import { sharedServerCommandFlags } from "./cli/config.ts";
+ import { projectCommand } from "./cli/project.ts";
+ import { threadCommand } from "./cli/thread.ts";
+@@ -105,6 +109,7 @@ export const cli = makeCli();
+ export function runCli() {
+   extendConnectionAttemptTimeout();
+   keepOutboundFetchOnHttp1();
++  presentTlsClientCertificate();
+   Command.run(cli, { version: packageJson.version }).pipe(
+     Effect.scoped,
+     Effect.provide(layerCliRuntime),
+diff --git a/apps/server/src/outboundHttp.test.ts b/apps/server/src/outboundHttp.test.ts
+index ed3b09ab..a82b8c90 100644
+--- a/apps/server/src/outboundHttp.test.ts
++++ b/apps/server/src/outboundHttp.test.ts
+@@ -1,6 +1,10 @@
+ // @effect-diagnostics nodeBuiltinImport:off - the test runs a real TLS h2 server to see which protocol fetch negotiates.
++import * as NodeFS from "node:fs";
+ import * as NodeHttp2 from "node:http2";
++import * as NodeHttps from "node:https";
+ import * as NodeNet from "node:net";
++import * as NodeOS from "node:os";
++import * as NodePath from "node:path";
+ import * as NodeTls from "node:tls";
+ 
+ import * as NodeServices from "@effect/platform-node/NodeServices";
+@@ -16,6 +20,8 @@ import {
+   builtinFetchUsesHttp2,
+   ignoreMacosTypeOfServiceEinval,
+   installHttp1FetchDispatcher,
++  presentTlsClientCertificate,
++  readTlsClientCertificate,
+ } from "./outboundHttp.ts";
+ 
+ // Non-secret, self-signed 127.0.0.1 certificate, valid until 2126; ALPN h2 requires TLS.
+@@ -44,6 +50,15 @@ const server = NodeHttp2.createSecureServer(
+   (request, response) => response.end(request.httpVersion),
+ );
+ let origin = "";
++// Answers with the CN of the client certificate it was offered, or "none".
++const certGate = NodeHttps.createServer(
++  { key: TEST_KEY, cert: TEST_CERT, requestCert: true, rejectUnauthorized: false },
++  (request, response) => {
++    const peer = (request.socket as NodeTls.TLSSocket).getPeerCertificate();
++    response.end(peer.subject?.CN ?? "none");
++  },
++);
++let certGateOrigin = "";
+ const defaultCaCertificates = NodeTls.getCACertificates("default");
+ const defaultDispatcher = Undici.getGlobalDispatcher();
+ const defaultAttemptTimeout = NodeNet.getDefaultAutoSelectFamilyAttemptTimeout();
+@@ -52,6 +67,8 @@ beforeAll(async () => {
+   NodeTls.setDefaultCACertificates([...defaultCaCertificates, TEST_CERT]);
+   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+   origin = `https://127.0.0.1:${(server.address() as NodeNet.AddressInfo).port}/`;
++  await new Promise<void>((resolve) => certGate.listen(0, "127.0.0.1", resolve));
++  certGateOrigin = `https://127.0.0.1:${(certGate.address() as NodeNet.AddressInfo).port}/`;
+ });
+ 
+ afterEach(() => {
+@@ -62,6 +79,7 @@ afterEach(() => {
+ afterAll(async () => {
+   NodeTls.setDefaultCACertificates(defaultCaCertificates);
+   await new Promise<void>((resolve) => server.close(() => resolve()));
++  await new Promise<void>((resolve) => certGate.close(() => resolve()));
+ });
+ 
+ const versionViaGlobalDispatcher = async () => (await Undici.request(origin)).body.text();
+@@ -97,6 +115,56 @@ describe("installHttp1FetchDispatcher", () => {
+   );
+ });
+ 
++describe("presentTlsClientCertificate", () => {
++  const offeredCertificate = () =>
++    HttpClient.get(certGateOrigin).pipe(
++      Effect.flatMap((response) => response.text),
++      Effect.provide(FetchHttpClient.layer),
++    );
++
++  it("reads the configured files, else <T3 home>/client-cert, and nothing when missing", () => {
++    const dir = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "t3-client-cert-"));
++    NodeFS.mkdirSync(NodePath.join(dir, "client-cert"));
++    NodeFS.writeFileSync(NodePath.join(dir, "client-cert", "client.crt"), TEST_CERT);
++    NodeFS.writeFileSync(NodePath.join(dir, "client-cert", "client.key"), TEST_KEY);
++    try {
++      expect(readTlsClientCertificate({ T3CODE_HOME: dir })?.cert.toString()).toBe(TEST_CERT);
++      expect(
++        readTlsClientCertificate({
++          T3CODE_TLS_CLIENT_CERT: NodePath.join(dir, "client-cert", "client.key"),
++          T3CODE_TLS_CLIENT_KEY: NodePath.join(dir, "client-cert", "client.crt"),
++        })?.cert.toString(),
++      ).toBe(TEST_KEY);
++      expect(readTlsClientCertificate({}, dir)).toBeUndefined();
++      expect(
++        readTlsClientCertificate({ T3CODE_HOME: NodePath.join(dir, "absent") }),
++      ).toBeUndefined();
++    } finally {
++      NodeFS.rmSync(dir, { recursive: true, force: true });
++    }
++  });
++
++  it.effect("makes built-in fetch offer the certificate to a server that asks for one", () =>
++    Effect.gen(function* () {
++      expect(yield* offeredCertificate()).toBe("none");
++      expect(presentTlsClientCertificate(undefined)).toBe(false);
++      expect(
++        presentTlsClientCertificate({ cert: Buffer.from(TEST_CERT), key: Buffer.from(TEST_KEY) }),
++      ).toBe(true);
++      expect(yield* offeredCertificate()).toBe("t3code outbound http test");
++      expect(yield* versionViaBuiltinFetch()).toBe("1.1");
++    }),
++  );
++
++  it("keeps the env proxy agent", () => {
++    Undici.setGlobalDispatcher(new Undici.EnvHttpProxyAgent());
++    expect(
++      presentTlsClientCertificate({ cert: Buffer.from(TEST_CERT), key: Buffer.from(TEST_KEY) }),
++    ).toBe(false);
++    expect(Undici.getGlobalDispatcher()).toBeInstanceOf(Undici.EnvHttpProxyAgent);
++  });
++});
++
+ const runNode = Effect.fnUntraced(function* (args: Array<string>) {
+   const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
+   const child = yield* spawner.spawn(ChildProcess.make(process.execPath, args));
+diff --git a/apps/server/src/outboundHttp.ts b/apps/server/src/outboundHttp.ts
+index ead14cb5..62719d38 100644
+--- a/apps/server/src/outboundHttp.ts
++++ b/apps/server/src/outboundHttp.ts
+@@ -1,5 +1,10 @@
++// @effect-diagnostics-next-line nodeBuiltinImport:off - runs before the Effect runtime exists.
++import * as NodeFS from "node:fs";
+ import * as NodeModule from "node:module";
+ import * as NodeNet from "node:net";
++import * as NodeOS from "node:os";
++// @effect-diagnostics-next-line nodeBuiltinImport:off - runs before the Effect runtime exists.
++import * as NodePath from "node:path";
+ 
+ import type * as Undici from "undici";
+ 
+@@ -31,6 +36,48 @@ export function keepOutboundFetchOnHttp1(): void {
+   if (builtinFetchUsesHttp2(process.versions.undici)) installHttp1FetchDispatcher();
+ }
+ 
++export interface TlsClientCertificate {
++  readonly cert: Buffer;
++  readonly key: Buffer;
++}
++
++/** PEM files from T3CODE_TLS_CLIENT_CERT/KEY, else <T3 home>/client-cert/client.{crt,key}. */
++export function readTlsClientCertificate(
++  env: NodeJS.ProcessEnv = process.env,
++  homeDir: string = NodeOS.homedir(),
++): TlsClientCertificate | undefined {
++  const t3Home = env.T3CODE_HOME?.trim() || NodePath.join(homeDir, ".t3");
++  const certPath =
++    env.T3CODE_TLS_CLIENT_CERT?.trim() || NodePath.join(t3Home, "client-cert", "client.crt");
++  const keyPath =
++    env.T3CODE_TLS_CLIENT_KEY?.trim() || NodePath.join(t3Home, "client-cert", "client.key");
++  try {
++    return { cert: NodeFS.readFileSync(certPath), key: NodeFS.readFileSync(keyPath) };
++  } catch {
++    return undefined;
++  }
++}
++
++/**
++ * Machines behind a client-certificate gate (self-hosted T3 Connect) refuse peer links without
++ * one. TLS sends it only to servers that request it. Built-in fetch on Node 24 (Electron) and 26
++ * both use this npm Agent through undici's global dispatcher symbol.
++ */
++export function presentTlsClientCertificate(
++  certificate: TlsClientCertificate | undefined = readTlsClientCertificate(),
++): boolean {
++  if (!certificate) return false;
++  const undici = requireUndici("undici") as typeof Undici;
++  if (undici.getGlobalDispatcher()?.constructor.name === "EnvHttpProxyAgent") return false;
++  undici.setGlobalDispatcher(
++    new undici.Agent({
++      allowH2: false,
++      connect: { cert: certificate.cert, key: certificate.key },
++    }),
++  );
++  return true;
++}
++
+ // @types/node does not declare setTypeOfService yet.
+ type TypeOfServiceSocket = {
+   setTypeOfService?: (this: NodeNet.Socket, typeOfService: number) => NodeNet.Socket;
+-- 
+2.50.1 (Apple Git-155)
+
