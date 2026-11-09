@@ -27,12 +27,12 @@ jobs:
         run: mv selfhost "$RUNNER_TEMP/selfhost" && ls "$RUNNER_TEMP/selfhost/patches"
 
       # Manual checkout: upstream has orphaned gitlinks under .repos that break actions/checkout.
-      - name: Checkout pingdotgg/t3code@v0.1.6
+      - name: Checkout pingdotgg/t3code@v0.1.7
         run: |
           set -euo pipefail
           git init .
           git remote add origin https://github.com/pingdotgg/t3code.git
-          git fetch --no-tags --depth=1 origin refs/tags/v0.1.6
+          git fetch --no-tags --depth=1 origin refs/tags/v0.1.7
           git sparse-checkout set --no-cone '/*' '!/.repos/'
           git checkout --detach FETCH_HEAD
           git log --oneline -1
@@ -65,8 +65,8 @@ jobs:
 
       # The tag still carries 0.1.5 in package.json; upstream's release stamps
       # the release version in before building, so do the same.
-      - name: Stamp version 0.1.6
-        run: node scripts/update-release-package-versions.ts 0.1.6 && git status --short
+      - name: Stamp version 0.1.7
+        run: node scripts/update-release-package-versions.ts 0.1.7 && git status --short
 
       - name: Build unsigned arm64 dmg
         env:
@@ -93,7 +93,7 @@ jobs:
           ls -la release
           grep -rl "relay.slop.ie" apps/desktop/dist-electron apps/server/dist > /tmp/hits; head -5 /tmp/hits
           grep -rl "T3CODE_TLS_CLIENT_CERT" apps/server/dist | head -2 | grep -q . || { echo "::error::client-certificate patch missing from server bundle"; exit 1; }
-          ls release/*0.1.6*.dmg
+          ls release/*0.1.7*.dmg
           if find release -name app-update.yml | grep -q .; then
             echo "::error::app-update.yml present, auto-update would be enabled"; find release -name app-update.yml -exec cat {} \;; exit 1
           fi
