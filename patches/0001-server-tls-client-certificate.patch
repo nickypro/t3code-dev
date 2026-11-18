@@ -1,4 +1,4 @@
-From 18f64c7daf1a1383cb495ee1a43cbf30906051df Mon Sep 17 00:00:00 2001
+From 41452300d65f182777e4b9ab78e580fda035d27e Mon Sep 17 00:00:00 2001
 From: Nicky Pochinkov <work@nicky.pro>
 Date: Thu, 5 Nov 2026 12:39:50 +0000
 Subject: [PATCH] feat(server): offer a TLS client certificate on outbound
@@ -14,14 +14,14 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
 ---
  apps/server/src/binCli.ts            |  7 ++-
  apps/server/src/outboundHttp.test.ts | 68 ++++++++++++++++++++++++++++
- apps/server/src/outboundHttp.ts      | 47 +++++++++++++++++++
- 3 files changed, 121 insertions(+), 1 deletion(-)
+ apps/server/src/outboundHttp.ts      | 49 ++++++++++++++++++++
+ 3 files changed, 123 insertions(+), 1 deletion(-)
 
 diff --git a/apps/server/src/binCli.ts b/apps/server/src/binCli.ts
-index 7c136ae5..607a241b 100644
+index 995b207e7c..7d166caa62 100644
 --- a/apps/server/src/binCli.ts
 +++ b/apps/server/src/binCli.ts
-@@ -15,7 +15,11 @@ import { appCommand } from "./cli/app.ts";
+@@ -17,7 +17,11 @@ import { appCommand } from "./cli/app.ts";
  import { browserCommand } from "./cli/browser.ts";
  import { pairCommand } from "./cli/pair.ts";
  import { hasCloudPublicConfig } from "./cloud/publicConfig.ts";
@@ -34,16 +34,16 @@ index 7c136ae5..607a241b 100644
  import { sharedServerCommandFlags } from "./cli/config.ts";
  import { projectCommand } from "./cli/project.ts";
  import { threadCommand } from "./cli/thread.ts";
-@@ -105,6 +109,7 @@ export const cli = makeCli();
+@@ -122,6 +126,7 @@ export const cli = makeCli();
  export function runCli() {
    extendConnectionAttemptTimeout();
    keepOutboundFetchOnHttp1();
 +  presentTlsClientCertificate();
-   Command.run(cli, { version: packageJson.version }).pipe(
-     Effect.scoped,
-     Effect.provide(layerCliRuntime),
+   offerCliInstall({
+     args: process.argv.slice(2),
+     // A child started over IPC (a service launcher) has no one to answer.
 diff --git a/apps/server/src/outboundHttp.test.ts b/apps/server/src/outboundHttp.test.ts
-index ed3b09ab..a82b8c90 100644
+index ed3b09abaa..a82b8c906a 100644
 --- a/apps/server/src/outboundHttp.test.ts
 +++ b/apps/server/src/outboundHttp.test.ts
 @@ -1,6 +1,10 @@
@@ -157,7 +157,7 @@ index ed3b09ab..a82b8c90 100644
    const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
    const child = yield* spawner.spawn(ChildProcess.make(process.execPath, args));
 diff --git a/apps/server/src/outboundHttp.ts b/apps/server/src/outboundHttp.ts
-index ead14cb5..62719d38 100644
+index ead14cb5d2..a42f609acf 100644
 --- a/apps/server/src/outboundHttp.ts
 +++ b/apps/server/src/outboundHttp.ts
 @@ -1,5 +1,10 @@
@@ -171,7 +171,7 @@ index ead14cb5..62719d38 100644
  
  import type * as Undici from "undici";
  
-@@ -31,6 +36,48 @@ export function keepOutboundFetchOnHttp1(): void {
+@@ -31,6 +36,50 @@ export function keepOutboundFetchOnHttp1(): void {
    if (builtinFetchUsesHttp2(process.versions.undici)) installHttp1FetchDispatcher();
  }
  
@@ -203,8 +203,10 @@ index ead14cb5..62719d38 100644
 + * both use this npm Agent through undici's global dispatcher symbol.
 + */
 +export function presentTlsClientCertificate(
-+  certificate: TlsClientCertificate | undefined = readTlsClientCertificate(),
++  ...args: [] | [certificate: TlsClientCertificate | undefined]
 +): boolean {
++  // An explicit `undefined` means "no certificate"; only a bare call reads the files.
++  const certificate = args.length === 0 ? readTlsClientCertificate() : args[0];
 +  if (!certificate) return false;
 +  const undici = requireUndici("undici") as typeof Undici;
 +  if (undici.getGlobalDispatcher()?.constructor.name === "EnvHttpProxyAgent") return false;
