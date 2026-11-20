@@ -1,0 +1,243 @@
+diff --git a/apps/web/src/components/Sidebar.browser.test.tsx b/apps/web/src/components/Sidebar.browser.test.tsx
+index b99591c92b..59040aba2e 100644
+--- a/apps/web/src/components/Sidebar.browser.test.tsx
++++ b/apps/web/src/components/Sidebar.browser.test.tsx
+@@ -397,3 +397,51 @@ describe("sidebar settled pagination", () => {
+     expect(screen.container.querySelectorAll("[data-thread-item]")).toHaveLength(loadedRows);
+   });
+ });
++
++describe("sidebar hidden machines", () => {
++  it("leaves a hidden machine's threads out of the list but keeps the open one", async () => {
++    using stack = new DisposableStack();
++    const previousSettings = getClientSettings();
++    stack.defer(() => __setClientSettingsForTests(previousSettings));
++    __setClientSettingsForTests({
++      ...DEFAULT_CLIENT_SETTINGS,
++      sidebarHiddenEnvironmentIds: ["remote"],
++    });
++    const localProject = project("active");
++    const remoteProject = { ...project("busy"), environmentId: EnvironmentId.make("remote") };
++    const onRemote = (index: number, title: string) =>
++      makeThreadFixture({
++        environmentId: remoteProject.environmentId,
++        id: ThreadId.make(`remote-${index}`),
++        projectId: remoteProject.id,
++        title,
++      });
++    const openThread = onRemote(1, "Remote open thread");
++    const threadRef = { environmentId: openThread.environmentId, threadId: openThread.id };
++    vi.mocked(useProjects).mockReturnValue([localProject, remoteProject]);
++    vi.mocked(useQuietThreadShells).mockReturnValue([
++      { ...threadShell(localProject.id, 0), title: "Local thread" },
++      onRemote(0, "Remote hidden thread"),
++      openThread,
++    ]);
++    vi.mocked(useThreadRouteTarget).mockReturnValue({ kind: "server", threadRef });
++    vi.mocked(useHandleNewThread).mockReturnValue({
++      activeDraftThread: null,
++      activeThread: null,
++      defaultProjectRef: { environmentId: localProject.environmentId, projectId: localProject.id },
++      defaultProjectFallbackReady: true,
++      handleNewThread: vi.fn().mockResolvedValue(null),
++      routeDraftId: null,
++      routeThreadRef: threadRef,
++    });
++    await using screen = await render(
++      <SidebarProvider>
++        <Sidebar routeReveal={{ observedKey: null, pendingKey: null }} />
++      </SidebarProvider>,
++    );
++
++    await expect.element(screen.getByText("Local thread").first()).toBeInTheDocument();
++    await expect.element(screen.getByText("Remote open thread").first()).toBeInTheDocument();
++    expect(screen.container.textContent).not.toContain("Remote hidden thread");
++  });
++});
+diff --git a/apps/web/src/components/Sidebar.tsx b/apps/web/src/components/Sidebar.tsx
+index e6cdb90d5c..e1be2f55f4 100644
+--- a/apps/web/src/components/Sidebar.tsx
++++ b/apps/web/src/components/Sidebar.tsx
+@@ -424,6 +424,7 @@ function useSidebarThreads(input: {
+   readonly connectedEnvironmentIds: readonly EnvironmentId[];
+   readonly optimisticDrop: SidebarOptimisticDrop | null;
+   readonly threads: readonly EnvironmentThreadShell[];
++  readonly hiddenEnvironmentIds: readonly string[];
+   readonly delegatedUnderParent: ReadonlySet<string>;
+   readonly routeRowThreadKey: string | null;
+   // Set in boring mode: the project groups to fold active threads into, in order.
+@@ -438,6 +439,7 @@ function useSidebarThreads(input: {
+     connectedEnvironmentIds,
+     optimisticDrop,
+     threads,
++    hiddenEnvironmentIds,
+     delegatedUnderParent,
+     routeRowThreadKey,
+     folderGroups,
+@@ -497,7 +499,12 @@ function useSidebarThreads(input: {
+     partition;
+   // Older settled threads load in pages; the shelf lists them only as far as they are loaded.
+   const olderSettledShelf = useOlderSettledShelf({
+-    scopes: olderSettledScopes([...serverConfigs.keys()], scopedProjectKeys),
++    scopes: olderSettledScopes(
++      [...serverConfigs.keys()].filter(
++        (environmentId) => !hiddenEnvironmentIds.includes(environmentId),
++      ),
++      scopedProjectKeys,
++    ),
+     expanded: settledShelfExpanded,
+     visibleCount: settledVisibleCount,
+   });
+@@ -812,7 +819,19 @@ function useSidebarLookups() {
+   const environments = useEnvironmentIdentities();
+   const serverConfigs = useServerConfigs();
+   const providerEntriesByEnvironment = useAtomValue(sidebarProviderEntriesAtom);
+-  const projectGroups = useSidebarProjectGroups();
++  const hiddenEnvironmentIds = useClientSettings((s) => s.sidebarHiddenEnvironmentIds);
++  const allProjectGroups = useSidebarProjectGroups();
++  // A project on hidden machines only leaves the folders and the project picker.
++  const projectGroups =
++    hiddenEnvironmentIds.length === 0
++      ? allProjectGroups
++      : allProjectGroups.filter(
++          (group) =>
++            group.memberProjectRefs.length === 0 ||
++            group.memberProjectRefs.some(
++              (ref) => !hiddenEnvironmentIds.includes(ref.environmentId),
++            ),
++        );
+   const environmentLabelById = new Map(
+     environments.map((environment) => [environment.environmentId, environment.label] as const),
+   );
+@@ -820,7 +839,7 @@ function useSidebarLookups() {
+     projects.map((project) => [`${project.environmentId}:${project.id}`, project] as const),
+   );
+   const projectDisplayNameByKey = new Map(
+-    projectGroups.flatMap((group) =>
++    allProjectGroups.flatMap((group) =>
+       group.memberProjects.map(
+         (project) => [`${project.environmentId}:${project.id}`, group.displayName] as const,
+       ),
+@@ -840,6 +859,7 @@ function useSidebarLookups() {
+     projects,
+     serverConfigs,
+     projectGroups,
++    hiddenEnvironmentIds,
+     environmentLabelById,
+     providerEntriesByEnvironment,
+     projectByKey,
+@@ -907,6 +927,7 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
+     projects,
+     serverConfigs,
+     projectGroups,
++    hiddenEnvironmentIds,
+     environmentLabelById,
+     providerEntriesByEnvironment,
+     projectByKey,
+@@ -1113,6 +1134,15 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
+       ? null
+       : scopedThreadKey(resolveListedAncestorThreadRef(routeThreadRef, threads));
+   const isSearchingThreads = threadSearchQuery.trim().length > 0;
++  // Hidden machines' threads stay out of the list; search and the open thread still show.
++  const sidebarThreads =
++    hiddenEnvironmentIds.length === 0 || isSearchingThreads
++      ? listedThreads
++      : listedThreads.filter(
++          (thread) =>
++            !hiddenEnvironmentIds.includes(thread.environmentId) ||
++            threadShellKey(thread) === routeRowThreadKey,
++        );
+   // The open draft's first send names its thread in place; a finalized draft reached by
+   // navigation resolves through its redirect instead, and still reveals.
+   const routeKeyInPlace = routeDraftThread?.promotedTo != null;
+@@ -1339,7 +1369,8 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
+     serverConfigs,
+     connectedEnvironmentIds,
+     optimisticDrop,
+-    threads: listedThreads,
++    threads: sidebarThreads,
++    hiddenEnvironmentIds,
+     delegatedUnderParent,
+     routeRowThreadKey,
+     folderGroups: boringSidebarEnabled
+diff --git a/apps/web/src/components/settings/ConnectionsSettings.tsx b/apps/web/src/components/settings/ConnectionsSettings.tsx
+index 9d309a8b90..8aa8ecb644 100644
+--- a/apps/web/src/components/settings/ConnectionsSettings.tsx
++++ b/apps/web/src/components/settings/ConnectionsSettings.tsx
+@@ -108,7 +108,11 @@ import {
+   usePrimaryEnvironment,
+ } from "~/state/environments";
+ import { requestConfirmDialog } from "~/confirmDialog";
+-import { useUpdateEnvironmentSettings } from "~/hooks/useSettings";
++import {
++  updateClientSettings,
++  useClientSettings,
++  useUpdateEnvironmentSettings,
++} from "~/hooks/useSettings";
+ import { useAtomCommand } from "../../state/use-atom-command";
+ import { environmentIdsKey } from "~/state/environmentAtomList";
+ import { environmentUpdateStatesAtom, serverEnvironment } from "~/state/server";
+@@ -157,6 +161,31 @@ const BACKEND_VALUE_DEFAULT_WSL = "backend:default-wsl";
+ const BACKEND_VALUE_WSL_OFF = "backend:wsl-off";
+ 
+ // Subscribes on its own so desktop download progress does not re-render the page.
++/** Per device: whether this machine's threads are listed in the sidebar. */
++function SidebarVisibilityRow({ environmentId }: { readonly environmentId: EnvironmentId }) {
++  const hiddenEnvironmentIds = useClientSettings((s) => s.sidebarHiddenEnvironmentIds);
++  const shown = !hiddenEnvironmentIds.includes(environmentId);
++  return (
++    <SettingsRow
++      title="Show threads in sidebar"
++      description="Off keeps this machine's threads out of the sidebar on this device. Search, links and open threads still reach them."
++      control={
++        <Switch
++          checked={shown}
++          aria-label="Show this machine's threads in the sidebar"
++          onCheckedChange={(checked) =>
++            void updateClientSettings({
++              sidebarHiddenEnvironmentIds: checked
++                ? hiddenEnvironmentIds.filter((id) => id !== environmentId)
++                : [...hiddenEnvironmentIds, environmentId],
++            })
++          }
++        />
++      }
++    />
++  );
++}
++
+ function LocalVersionStatusLabel() {
+   const updateState = useDesktopUpdateState();
+   return (
+@@ -1243,6 +1272,7 @@ function ConnectionsSettingsContent({
+                 <ManagedByOrganization policy={accessServerConfig.managedPolicy} />
+               </div>
+             ) : null}
++            <SidebarVisibilityRow environmentId={accessEnvironmentId} />
+             {canManageLocalBackend ? (
+               <SettingsRow
+                 title="Version"
+diff --git a/packages/contracts/src/settings.ts b/packages/contracts/src/settings.ts
+index 0013e28898..8bb0ca4de7 100644
+--- a/packages/contracts/src/settings.ts
++++ b/packages/contracts/src/settings.ts
+@@ -545,6 +545,11 @@ export const ClientSettingsSchema = Schema.Struct({
+     Schema.withDecodingDefault(Effect.succeed({})),
+   ),
+   sidebarWorkingShelfEnabled: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
++  // Machines whose threads this device leaves out of the sidebar list. Search, links and
++  // the open thread still reach them.
++  sidebarHiddenEnvironmentIds: Schema.Array(TrimmedNonEmptyString).pipe(
++    Schema.withDecodingDefault(Effect.succeed([])),
++  ),
+   sidebarProjectGroupingMode: SidebarProjectGroupingMode.pipe(
+     Schema.withDecodingDefault(Effect.succeed(DEFAULT_SIDEBAR_PROJECT_GROUPING_MODE)),
+   ),
+@@ -2093,6 +2098,7 @@ export const ClientSettingsPatch = Schema.Struct({
+   threadDetailsUsageEnabled: Schema.optionalKey(Schema.Boolean),
+   threadDetailsItems: Schema.optionalKey(Schema.Record(Schema.String, Schema.Boolean)),
+   sidebarWorkingShelfEnabled: Schema.optionalKey(Schema.Boolean),
++  sidebarHiddenEnvironmentIds: Schema.optionalKey(Schema.Array(TrimmedNonEmptyString)),
+   sidebarProjectGroupingMode: Schema.optionalKey(SidebarProjectGroupingMode),
+   sidebarProjectGroupingOverrides: Schema.optionalKey(
+     Schema.Record(TrimmedNonEmptyString, SidebarProjectGroupingMode),
