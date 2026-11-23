@@ -20,7 +20,7 @@ index d0882a5dd61e3c4dd8d0f0a63cc8044a949504e6..35123168852190926401ff134e9688e1
    );
  }
 diff --git a/apps/web/src/components/sidebar/SidebarChrome.tsx b/apps/web/src/components/sidebar/SidebarChrome.tsx
-index dd41ddd2a0213113428c5e8d380172fe2288d65a..c141446c13d8c16cfce06b3cfa7ec6933ec3a3bc 100644
+index dd41ddd2a0213113428c5e8d380172fe2288d65a..c201f4b35d4214e890bd90e9d6f1eac2522c5048 100644
 --- a/apps/web/src/components/sidebar/SidebarChrome.tsx
 +++ b/apps/web/src/components/sidebar/SidebarChrome.tsx
 @@ -14,7 +14,6 @@ import {
@@ -31,22 +31,41 @@ index dd41ddd2a0213113428c5e8d380172fe2288d65a..c141446c13d8c16cfce06b3cfa7ec693
  import {
    resolveEnvironmentIdentificationPillLabel,
    resolveSidebarStageBackdropVariant,
-@@ -180,14 +179,16 @@ function SidebarBrand({ onBackdrop }: { onBackdrop: boolean }) {
- function SidebarBrandMark({ onBackdrop }: { onBackdrop: boolean }) {
+@@ -113,7 +112,7 @@ export function SidebarBrandWidthProbe({
+       ref={observeWidth}
+     >
+       <div className="ml-[var(--workspace-titlebar-content-left)] flex gap-1">
+-        <SidebarBrandMark onBackdrop={false} />
++        <SidebarBrandMark />
+         {isElectron ? <div className="w-[calc(2*var(--workspace-titlebar-control-size))]" /> : null}
+       </div>
+     </div>
+@@ -172,22 +171,17 @@ function SidebarBrand({ onBackdrop }: { onBackdrop: boolean }) {
+       )}
+       to="/"
+     >
+-      <SidebarBrandMark onBackdrop={onBackdrop} />
++      <SidebarBrandMark />
+     </Link>
+   );
+ }
+ 
+-function SidebarBrandMark({ onBackdrop }: { onBackdrop: boolean }) {
++function SidebarBrandMark() {
++  // Just "Catgirl": a longer title raises the sidebar's minimum width and pushes the header along.
    return (
-     <span className="inline-flex min-w-0 items-baseline gap-1 text-sm font-medium tracking-tight">
+-    <span className="inline-flex min-w-0 items-baseline gap-1 text-sm font-medium tracking-tight">
 -      <T3Wordmark aria-label="T3" className="h-[1cap] w-auto shrink-0" />
-+      <span className="shrink-0 font-semibold [text-box:trim-both_cap_alphabetic] supports-[text-box:trim-both_cap_alphabetic]:py-1">
-+        Catgirl
-+      </span>
-       <span
-         className={cn(
-           "truncate [text-box:trim-both_cap_alphabetic] supports-[text-box:trim-both_cap_alphabetic]:py-1",
-           onBackdrop ? "text-white/70" : "text-muted-foreground",
-         )}
-       >
+-      <span
+-        className={cn(
+-          "truncate [text-box:trim-both_cap_alphabetic] supports-[text-box:trim-both_cap_alphabetic]:py-1",
+-          onBackdrop ? "text-white/70" : "text-muted-foreground",
+-        )}
+-      >
 -        Code
-+        Code :3
++    <span className="inline-flex min-w-0 items-baseline text-sm font-semibold tracking-tight">
++      <span className="truncate [text-box:trim-both_cap_alphabetic] supports-[text-box:trim-both_cap_alphabetic]:py-1">
++        Catgirl
        </span>
      </span>
    );
