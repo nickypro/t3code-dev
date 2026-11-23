@@ -1,0 +1,531 @@
+diff --git a/apps/web/src/components/Sidebar.tsx b/apps/web/src/components/Sidebar.tsx
+index e1be2f55f42d757f8b81d5955f4042bf0d52203e..471c54bedd3cb50d3d3f811668252a41b6f7d7b0 100644
+--- a/apps/web/src/components/Sidebar.tsx
++++ b/apps/web/src/components/Sidebar.tsx
+@@ -252,6 +252,8 @@ import {
+   useComboboxFilter,
+ } from "./ui/combobox";
+ import { SidebarContent, SidebarGroup, useSidebar } from "./ui/sidebar";
++import { SidebarCatFleet } from "./sidebar/SidebarCatFleet";
++import { summarizeCatFleet } from "./sidebar/SidebarCatFleet.logic";
+ import { SidebarChromeFooter, SidebarChromeHeader } from "./sidebar/SidebarChrome";
+ import { SidebarHeaderIconButton, SidebarThreadHeader } from "./sidebar/SidebarThreadHeader";
+ import { TooltipProvider } from "./ui/tooltip";
+@@ -2992,9 +2994,17 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
+       ? shortcutLabelForCommand(keybindings, "chat.newLocal")
+       : undefined);
+   const newThreadInProjectShortcutLabel = shortcutLabelForCommand(keybindings, "chat.newLocal");
++  // Every thread, not the listed ones: the fleet also shows sub-agents and hidden machines.
++  const catFleet = summarizeCatFleet({
++    environmentLabelById,
++    connectedEnvironmentIds,
++    threads,
++    isWorking: isThreadWorking,
++  });
+   return (
+     <SidebarFolderDrop>
+       <SidebarChromeHeader isElectron={isElectron} />
++      <SidebarCatFleet machines={catFleet} />
+       <SidebarContent
+         ref={sidebarContentRef}
+         className="min-h-full"
+diff --git a/apps/web/src/components/sidebar/SidebarCatFleet.logic.test.ts b/apps/web/src/components/sidebar/SidebarCatFleet.logic.test.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..794be5ef517bb646043ef830ddead5bbc397554f
+--- /dev/null
++++ b/apps/web/src/components/sidebar/SidebarCatFleet.logic.test.ts
+@@ -0,0 +1,69 @@
++import { describe, expect, it } from "vite-plus/test";
++
++import { summarizeCatFleet } from "./SidebarCatFleet.logic";
++
++describe("summarizeCatFleet", () => {
++  it("lists each machine's running and unsettled threads and counts sub-agents on their thread", () => {
++    const thread = (
++      environmentId: string,
++      id: string,
++      overrides: Partial<{
++        working: boolean;
++        subagentOf: string;
++        settled: boolean;
++        snoozedUntil: string;
++        archivedAt: string;
++      }> = {},
++    ) => ({
++      environmentId,
++      id,
++      working: overrides.working ?? false,
++      lineage: {
++        relationshipToParent: overrides.subagentOf === undefined ? null : ("subagent" as const),
++        rootThreadId: overrides.subagentOf ?? id,
++      },
++      settledOverride: overrides.settled ? ("settled" as const) : null,
++      snoozedUntil: overrides.snoozedUntil ?? null,
++      archivedAt: overrides.archivedAt ?? null,
++    });
++    const fleet = summarizeCatFleet({
++      environmentLabelById: new Map([
++        ["mac", "Mac"],
++        ["box", "Box"],
++      ]),
++      connectedEnvironmentIds: ["mac"],
++      threads: [
++        thread("mac", "stopped"),
++        thread("mac", "running", { working: true }),
++        thread("mac", "sub-1", { working: true, subagentOf: "running" }),
++        thread("mac", "sub-idle", { subagentOf: "running" }),
++        thread("mac", "settled", { settled: true }),
++        thread("mac", "settled-parent", { settled: true }),
++        thread("mac", "sub-2", { working: true, subagentOf: "settled-parent" }),
++        thread("mac", "snoozed", { snoozedUntil: "2030-01-01T00:00:00.000Z" }),
++        thread("mac", "archived", { archivedAt: "2026-01-01T00:00:00.000Z" }),
++        thread("box", "settled-running", { settled: true, working: true }),
++      ],
++      isWorking: (candidate) => candidate.working,
++    });
++
++    expect(fleet).toEqual([
++      {
++        environmentId: "mac",
++        label: "Mac",
++        offline: false,
++        bodies: [
++          { key: "running", running: true, subagents: 1 },
++          { key: "stopped", running: false, subagents: 0 },
++          { key: "settled-parent", running: false, subagents: 1 },
++        ],
++      },
++      {
++        environmentId: "box",
++        label: "Box",
++        offline: true,
++        bodies: [{ key: "settled-running", running: true, subagents: 0 }],
++      },
++    ]);
++  });
++});
+diff --git a/apps/web/src/components/sidebar/SidebarCatFleet.logic.ts b/apps/web/src/components/sidebar/SidebarCatFleet.logic.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..429d0e4c4b4bfe9e953f8c2a53703da1cce49b24
+--- /dev/null
++++ b/apps/web/src/components/sidebar/SidebarCatFleet.logic.ts
+@@ -0,0 +1,96 @@
++export interface CatFleetBody {
++  /** The thread's id. A body keeps its orbit, place and colour for as long as it is shown. */
++  readonly key: string;
++  readonly running: boolean;
++  /** Sub-agents of this thread that are running now. */
++  readonly subagents: number;
++}
++
++export interface CatFleetMachine {
++  readonly environmentId: string;
++  readonly label: string;
++  readonly offline: boolean;
++  /** Running threads first, then the stopped ones that are not settled yet. */
++  readonly bodies: readonly CatFleetBody[];
++}
++
++interface FleetThread {
++  readonly environmentId: string;
++  readonly id: string;
++  readonly lineage: {
++    readonly relationshipToParent: "fork" | "subagent" | null;
++    readonly rootThreadId: string;
++    readonly sideChat?: boolean | undefined;
++  };
++  readonly settledOverride: "settled" | "active" | null;
++  readonly snoozedUntil: string | null;
++  readonly archivedAt: string | null;
++}
++
++/**
++ * One entry per machine in catalog order, hidden machines included: the fleet is the overview
++ * the thread list's filters leave out. Sub-agents count on the thread that started them.
++ */
++export function summarizeCatFleet<T extends FleetThread>(input: {
++  readonly environmentLabelById: ReadonlyMap<string, string>;
++  readonly connectedEnvironmentIds: readonly string[];
++  readonly threads: readonly T[];
++  readonly isWorking: (thread: T) => boolean;
++}): readonly CatFleetMachine[] {
++  type Body = { running: boolean; subagents: number };
++  const bodiesByMachine = new Map<string, Map<string, Body>>();
++  const bodiesOf = (environmentId: string) => {
++    const bodies = bodiesByMachine.get(environmentId) ?? new Map<string, Body>();
++    bodiesByMachine.set(environmentId, bodies);
++    return bodies;
++  };
++  const runningSubagentRoots: Array<{ environmentId: string; rootThreadId: string }> = [];
++  for (const thread of input.threads) {
++    const working = input.isWorking(thread);
++    if (thread.lineage.relationshipToParent === "subagent") {
++      if (working) {
++        runningSubagentRoots.push({
++          environmentId: thread.environmentId,
++          rootThreadId: thread.lineage.rootThreadId,
++        });
++      }
++      continue;
++    }
++    if (thread.lineage.sideChat === true || thread.archivedAt !== null) continue;
++    const waiting = thread.settledOverride !== "settled" && thread.snoozedUntil === null;
++    if (working || waiting) {
++      bodiesOf(thread.environmentId).set(thread.id, { running: working, subagents: 0 });
++    }
++  }
++  for (const { environmentId, rootThreadId } of runningSubagentRoots) {
++    const bodies = bodiesOf(environmentId);
++    // A settled thread whose sub-agent still runs shows as stopped, with that moon round it.
++    const body = bodies.get(rootThreadId) ?? { running: false, subagents: 0 };
++    body.subagents += 1;
++    bodies.set(rootThreadId, body);
++  }
++  return [...input.environmentLabelById].map(([environmentId, label]) => {
++    const bodies = [...(bodiesByMachine.get(environmentId) ?? [])].map(([key, body]) => ({
++      key,
++      ...body,
++    }));
++    return {
++      environmentId,
++      label,
++      offline: !input.connectedEnvironmentIds.includes(environmentId),
++      bodies: [...bodies.filter((body) => body.running), ...bodies.filter((body) => !body.running)],
++    };
++  });
++}
++
++/** A stable number in [0, 1) for a key, so a body keeps its place and colour across renders. */
++export function fleetHashUnit(key: string): number {
++  let hash = 2166136261;
++  for (let index = 0; index < key.length; index++) {
++    hash = Math.imul(hash ^ key.charCodeAt(index), 16777619);
++  }
++  // Without a final mix, keys that differ only at the end land almost on top of each other.
++  hash = Math.imul(hash ^ (hash >>> 16), 0x85ebca6b);
++  hash = Math.imul(hash ^ (hash >>> 13), 0xc2b2ae35);
++  return ((hash ^ (hash >>> 16)) >>> 0) / 4294967296;
++}
+diff --git a/apps/web/src/components/sidebar/SidebarCatFleet.tsx b/apps/web/src/components/sidebar/SidebarCatFleet.tsx
+new file mode 100644
+index 0000000000000000000000000000000000000000..a27b4010a07d31cc45b41b626a4604173eb27a2c
+--- /dev/null
++++ b/apps/web/src/components/sidebar/SidebarCatFleet.tsx
+@@ -0,0 +1,271 @@
++import type { CSSProperties } from "react";
++import { memo, useId } from "react";
++
++import { cn } from "../../lib/utils";
++import { observeVisibleAnimation } from "../../lib/visibleAnimation";
++import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
++import { fleetHashUnit, type CatFleetBody, type CatFleetMachine } from "./SidebarCatFleet.logic";
++
++// One planet, in CSS pixels. The cat head is the app icon's, drawn in the icon's own units.
++const PLANET = { width: 66, height: 38 };
++const HEAD = { x: 33, y: 20.5, radius: 11.5 };
++const HEAD_SCALE = HEAD.radius / 133;
++const HEAD_VIEW_BOX = `${256 - HEAD.x / HEAD_SCALE} ${261 - HEAD.y / HEAD_SCALE} ${PLANET.width / HEAD_SCALE} ${PLANET.height / HEAD_SCALE}`;
++const ORBIT_CENTER = { x: HEAD.x, y: HEAD.y + 0.15 * HEAD.radius };
++const ORBIT_SQUASH = 68.6 / 207;
++// Outer orbits turn more slowly, as real ones do.
++const ORBITS = [
++  { radius: 17.5, tilt: -26, period: 7.5 },
++  { radius: 23.5, tilt: 9, period: 10.5 },
++  { radius: 29.5, tilt: -9, period: 14 },
++];
++const MOON_SIZE = 5;
++const STOPPED_SIZE = 4.2;
++const SUBAGENT = { size: 2.2, radius: 4.8, period: 3.2, max: 3 };
++const MOON_COLORS = ["var(--color-cat-pink)", "var(--color-cat-cream)", "var(--color-cat-peach)"];
++const MAX_BODIES = 14;
++const POINT = "absolute top-0 left-0 size-0";
++const UNSQUASH = `scaleY(${1 / ORBIT_SQUASH})`;
++
++/**
++ * Every machine as a cat planet. A running thread is a moon in orbit, a stopped one is a ring
++ * frozen where it stopped, and a running sub-agent circles the thread that started it.
++ */
++export const SidebarCatFleet = memo(function SidebarCatFleet({
++  machines,
++}: {
++  machines: readonly CatFleetMachine[];
++}) {
++  if (machines.length === 0) return null;
++  return (
++    <div ref={observeVisibleAnimation} className="flex shrink-0 flex-wrap px-2 pb-1">
++      {machines.map((machine) => (
++        <CatPlanet key={machine.environmentId} machine={machine} />
++      ))}
++    </div>
++  );
++});
++
++function describeMachine(machine: CatFleetMachine): string {
++  if (machine.offline) return "offline";
++  const running = machine.bodies.filter((body) => body.running).length;
++  const subagents = machine.bodies.reduce((total, body) => total + body.subagents, 0);
++  const subagentNote =
++    subagents === 0 ? "" : ` (+${subagents} ${subagents === 1 ? "sub-agent" : "sub-agents"})`;
++  return `${running} running${subagentNote}, ${machine.bodies.length - running} stopped`;
++}
++
++function CatPlanet({ machine }: { machine: CatFleetMachine }) {
++  const gradientId = useId();
++  const bodies = machine.offline ? [] : machine.bodies.slice(0, MAX_BODIES);
++  const speed = 0.9 + fleetHashUnit(machine.environmentId) * 0.3;
++  const summary = describeMachine(machine);
++  const fill = machine.offline ? "currentColor" : `url(#${gradientId})`;
++
++  return (
++    <Tooltip>
++      <TooltipTrigger
++        render={
++          <div
++            aria-label={`${machine.label}: ${summary}`}
++            className="flex flex-col items-center text-foreground"
++            role="img"
++            style={{ width: PLANET.width }}
++          />
++        }
++      >
++        <div className="relative" style={PLANET}>
++          <OrbitLayer side="back" bodies={bodies} speed={speed} />
++          <svg
++            aria-hidden="true"
++            className={cn(
++              "absolute inset-0 z-[1] size-full overflow-visible",
++              machine.offline && "text-muted-foreground/40",
++            )}
++            viewBox={HEAD_VIEW_BOX}
++          >
++            <defs>
++              <linearGradient
++                gradientUnits="userSpaceOnUse"
++                id={gradientId}
++                x1="256"
++                x2="256"
++                y1="95"
++                y2="394"
++              >
++                <stop offset="0" stopColor="var(--color-cat-light)" />
++                <stop offset=".55" stopColor="var(--color-cat)" />
++                <stop offset="1" stopColor="var(--color-cat-dark)" />
++              </linearGradient>
++            </defs>
++            <path
++              d="M 126.04,232.73 L 154.09,103.79 Q 156,95 163.87,99.37 L 222.92,132.18 Z"
++              fill={fill}
++            />
++            <path
++              d="M 385.96,232.73 L 357.91,103.79 Q 356,95 348.13,99.37 L 289.08,132.18 Z"
++              fill={fill}
++            />
++            <circle cx="256" cy="261" fill={fill} r="133" />
++          </svg>
++          <OrbitLayer side="front" bodies={bodies} speed={speed} />
++        </div>
++        <span
++          className={cn(
++            "max-w-full truncate px-0.5 text-3xs",
++            machine.offline ? "text-muted-foreground/50" : "text-muted-foreground",
++          )}
++        >
++          {machine.label}
++        </span>
++      </TooltipTrigger>
++      <TooltipPopup side="bottom">
++        {machine.label} · {summary}
++      </TooltipPopup>
++    </Tooltip>
++  );
++}
++
++/**
++ * Each orbit is a flat circle squashed and tilted by one static transform; only rotations
++ * animate, so the compositor moves the moons without repainting. The back copy is whole and
++ * sits behind the cat. The front copy shows the near half over it.
++ */
++function OrbitLayer({
++  side,
++  bodies,
++  speed,
++}: {
++  side: "back" | "front";
++  bodies: readonly CatFleetBody[];
++  speed: number;
++}) {
++  const front = side === "front";
++  return ORBITS.map((orbit, orbitIndex) => {
++    const halfBox = orbit.radius + 8;
++    return (
++      <div
++        className={cn(
++          "pointer-events-none absolute origin-top",
++          front ? "z-[2] overflow-hidden" : "z-0",
++        )}
++        key={orbit.radius}
++        style={{
++          left: ORBIT_CENTER.x - halfBox,
++          top: ORBIT_CENTER.y,
++          width: 2 * halfBox,
++          height: halfBox,
++          transform: `rotate(${orbit.tilt}deg) scaleY(${ORBIT_SQUASH})`,
++        }}
++      >
++        <div className="absolute top-0 left-1/2 size-0">
++          <span
++            className="absolute rounded-full border border-current opacity-10"
++            style={{ width: 2 * orbit.radius, height: 2 * orbit.radius, margin: -orbit.radius }}
++          />
++          {bodies
++            .filter(
++              (body) => Math.floor(fleetHashUnit(body.key) * 7919) % ORBITS.length === orbitIndex,
++            )
++            .map((body) => (
++              <OrbitingBody
++                body={body}
++                front={front}
++                key={body.key}
++                period={orbit.period * speed}
++                radius={orbit.radius}
++              />
++            ))}
++        </div>
++      </div>
++    );
++  });
++}
++
++function orbitStyle(period: number, phase: number, held = false): CSSProperties {
++  return {
++    "--cat-orbit-period": `${period}s`,
++    "--cat-orbit-delay": `${-phase * period}s`,
++    ...(held ? { animationPlayState: "paused" } : {}),
++  } as CSSProperties;
++}
++
++function OrbitingBody({
++  body,
++  front,
++  period,
++  radius,
++}: {
++  body: CatFleetBody;
++  front: boolean;
++  period: number;
++  radius: number;
++}) {
++  const unit = fleetHashUnit(body.key);
++  const color = MOON_COLORS[Math.floor(unit * 997) % MOON_COLORS.length];
++  const subagents = Math.min(body.subagents, SUBAGENT.max);
++  // A stopped thread's arm is paused, not removed, so its ring stays where the moon stopped.
++  const held = !body.running;
++
++  return (
++    <span className={cn(POINT, "cat-orbit-arm")} style={orbitStyle(period, unit, held)}>
++      <span className={POINT} style={{ transform: `translateX(${radius}px)` }}>
++        <span className={cn(POINT, "cat-orbit-unspin")} style={orbitStyle(period, unit, held)}>
++          {body.running ? (
++            <span
++              className="absolute rounded-full"
++              style={{
++                width: MOON_SIZE,
++                height: MOON_SIZE,
++                margin: -MOON_SIZE / 2,
++                background: color,
++                // Over the cat a glow would vanish into the orange, so the near copy gets an edge.
++                boxShadow: front
++                  ? "0 0 0 0.8px var(--color-cat-shade)"
++                  : `0 0 ${MOON_SIZE * 0.7}px ${MOON_SIZE * 0.12}px color-mix(in srgb, ${color} 60%, transparent)`,
++                transform: UNSQUASH,
++              }}
++            />
++          ) : (
++            <span
++              className="absolute rounded-full border border-current opacity-60"
++              style={{
++                width: STOPPED_SIZE,
++                height: STOPPED_SIZE,
++                margin: -STOPPED_SIZE / 2,
++                transform: UNSQUASH,
++              }}
++            />
++          )}
++          {Array.from({ length: subagents }, (_, index) => {
++            const phase = index / subagents + unit;
++            return (
++              <span
++                className={cn(POINT, "cat-orbit-arm")}
++                key={index}
++                style={orbitStyle(SUBAGENT.period, phase)}
++              >
++                <span className={POINT} style={{ transform: `translateX(${SUBAGENT.radius}px)` }}>
++                  <span
++                    className={cn(POINT, "cat-orbit-unspin")}
++                    style={orbitStyle(SUBAGENT.period, phase)}
++                  >
++                    <span
++                      className="absolute rounded-full bg-current"
++                      style={{
++                        width: SUBAGENT.size,
++                        height: SUBAGENT.size,
++                        margin: -SUBAGENT.size / 2,
++                        transform: UNSQUASH,
++                      }}
++                    />
++                  </span>
++                </span>
++              </span>
++            );
++          })}
++        </span>
++      </span>
++    </span>
++  );
++}
+diff --git a/apps/web/src/index.css b/apps/web/src/index.css
+index 771c714b1ff8a210ecaa7ad398e2769036162482..961cbd9f2e931a7e83c5ba8c3e7b66a146a35e7c 100644
+--- a/apps/web/src/index.css
++++ b/apps/web/src/index.css
+@@ -168,6 +168,14 @@ html[data-mobile-composer-route-transition="true"]::view-transition-old(t3-mobil
+    the variables and Settings -> Appearance can override them at runtime. The
+    default stacks are mirrored in `appearanceFonts.ts`. */
+ @theme {
++  /* The app icon's palette, for the sidebar's cat planets. */
++  --color-cat-light: #fdb14f;
++  --color-cat: #ee8a2e;
++  --color-cat-dark: #dc6a18;
++  --color-cat-cream: #fbf1dc;
++  --color-cat-pink: #f5b4a2;
++  --color-cat-peach: #ffd9a8;
++  --color-cat-shade: rgb(40 22 8 / 0.55);
+   --font-sans:
+     -apple-system, BlinkMacSystemFont, "Inter Variable", "Segoe UI", system-ui, sans-serif;
+   --font-mono:
+@@ -583,6 +591,26 @@ html[data-mobile-composer-route-transition="true"]::view-transition-old(t3-mobil
+   will-change: var(--visible-animation-will-change, auto);
+ }
+ 
++/* Moons round the sidebar's cat planets. The arm turns and the moon turns back by the same
++   amount, so only transforms animate and each moon stays round on its squashed orbit. */
++@keyframes cat-orbit {
++  to {
++    transform: rotate(360deg);
++  }
++}
++
++@utility cat-orbit-arm {
++  animation: cat-orbit var(--cat-orbit-period, 10s) linear infinite;
++  animation-delay: var(--cat-orbit-delay, 0s);
++  animation-play-state: var(--visible-animation-state, paused);
++}
++
++@utility cat-orbit-unspin {
++  animation: cat-orbit var(--cat-orbit-period, 10s) linear infinite reverse;
++  animation-delay: var(--cat-orbit-delay, 0s);
++  animation-play-state: var(--visible-animation-state, paused);
++}
++
+ @keyframes live-activity-focus {
+   from {
+     transform: translateX(0);
