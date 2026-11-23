@@ -1,0 +1,406 @@
+diff --git a/apps/web/src/components/settings/ConnectionsSettings.tsx b/apps/web/src/components/settings/ConnectionsSettings.tsx
+index 8aa8ecb644577155d120a77126f67e7875028614..dbc841288445c91052479aa1097fe9493f1fa86a 100644
+--- a/apps/web/src/components/settings/ConnectionsSettings.tsx
++++ b/apps/web/src/components/settings/ConnectionsSettings.tsx
+@@ -40,6 +40,7 @@ import { useAccessEnvironment } from "./useAccessEnvironment";
+ import { SettingsPageContainer, SettingsRow, SettingsSection } from "./settingsLayout";
+ import { ManagedByOrganization } from "../ManagedPolicy";
+ import { LocalEnvironmentSetting } from "./LocalEnvironmentSetting";
++import { DeviceNameRow } from "./DeviceNameRow";
+ import { searchableSetting } from "./settingsSearch";
+ import { ConnectDeviceApprovalSettings } from "./ConnectDeviceApprovalSettings";
+ import { EnvironmentIconMenu } from "./EnvironmentIconPicker";
+@@ -1272,6 +1273,7 @@ function ConnectionsSettingsContent({
+                 <ManagedByOrganization policy={accessServerConfig.managedPolicy} />
+               </div>
+             ) : null}
++            <DeviceNameRow key={accessEnvironmentId} environmentId={accessEnvironmentId} />
+             <SidebarVisibilityRow environmentId={accessEnvironmentId} />
+             {canManageLocalBackend ? (
+               <SettingsRow
+diff --git a/apps/web/src/components/settings/DeviceNameRow.browser.test.tsx b/apps/web/src/components/settings/DeviceNameRow.browser.test.tsx
+new file mode 100644
+index 0000000000000000000000000000000000000000..b956b8b2bff5dbc00c36142ebc910b6b622b853c
+--- /dev/null
++++ b/apps/web/src/components/settings/DeviceNameRow.browser.test.tsx
+@@ -0,0 +1,57 @@
++import { DEFAULT_CLIENT_SETTINGS, EnvironmentId } from "@t3tools/contracts";
++import { expect, it, vi } from "vite-plus/test";
++
++import { render } from "../../../test/render";
++import { environmentLabelOverridesAtom } from "../../connection/environmentLabelOverrides";
++import { __setClientSettingsForTests, getClientSettings } from "../../hooks/useSettings";
++import { appAtomRegistry } from "../../rpc/atomRegistry";
++import { DeviceNameRow } from "./DeviceNameRow";
++
++const DEV = EnvironmentId.make("env-dev");
++const CFH = EnvironmentId.make("env-cfh");
++
++// Two machines that report the same name, as two accounts in one container do.
++vi.mock("~/connection/catalog", async (importOriginal) => {
++  const original = await importOriginal<typeof import("~/connection/catalog")>();
++  const { Atom } = await import("effect/reactivity");
++  const entry = (environmentId: string) =>
++    [environmentId, { target: { environmentId, label: "research-box" }, enabled: true }] as const;
++  const savedCatalogValueAtom = Atom.make({
++    isReady: true,
++    entries: new Map([entry("env-dev"), entry("env-cfh")]),
++  }).pipe(Atom.keepAlive);
++  return { environmentCatalog: { ...original.environmentCatalog, savedCatalogValueAtom } };
++});
++
++it("names a machine on this device, and clearing the name goes back", async () => {
++  using stack = new DisposableStack();
++  const previousSettings = getClientSettings();
++  stack.defer(() => __setClientSettingsForTests(previousSettings));
++  __setClientSettingsForTests({
++    ...DEFAULT_CLIENT_SETTINGS,
++    environmentLabelOverrides: { [CFH]: "slop cfh" },
++  });
++  await using screen = await render(<DeviceNameRow environmentId={DEV} />);
++  const input = screen.getByRole("textbox", { name: "Name for this machine on this device" });
++
++  await expect.element(input).toHaveAttribute("placeholder", "research-box");
++  await input.fill("  slop dev ");
++  await input.element().blur();
++
++  await vi.waitFor(() =>
++    expect(getClientSettings().environmentLabelOverrides).toEqual({
++      [CFH]: "slop cfh",
++      [DEV]: "slop dev",
++    }),
++  );
++  expect(appAtomRegistry.get(environmentLabelOverridesAtom)[DEV]).toBe("slop dev");
++  await expect.element(input).toHaveValue("slop dev");
++
++  await input.fill("");
++  await input.element().blur();
++
++  await vi.waitFor(() =>
++    expect(getClientSettings().environmentLabelOverrides).toEqual({ [CFH]: "slop cfh" }),
++  );
++  expect(appAtomRegistry.get(environmentLabelOverridesAtom)[DEV]).toBeUndefined();
++});
+diff --git a/apps/web/src/components/settings/DeviceNameRow.tsx b/apps/web/src/components/settings/DeviceNameRow.tsx
+new file mode 100644
+index 0000000000000000000000000000000000000000..0908ba0def3109a17020ae89208340b149737e04
+--- /dev/null
++++ b/apps/web/src/components/settings/DeviceNameRow.tsx
+@@ -0,0 +1,46 @@
++import { useAtomValue } from "@effect/atom-react";
++import type { EnvironmentId } from "@t3tools/contracts";
++
++import { environmentCatalog } from "~/connection/catalog";
++import { updateClientSettings, useClientSettings } from "~/hooks/useSettings";
++import { DraftInput } from "../ui/draft-input";
++import { SettingsRow } from "./settingsLayout";
++
++const NAME_MAX_LENGTH = 40;
++
++/** Per device: the name this app shows for the machine. Empty goes back to the machine's own. */
++export function DeviceNameRow({ environmentId }: { readonly environmentId: EnvironmentId }) {
++  const overrides = useClientSettings((s) => s.environmentLabelOverrides);
++  const ownLabel = useAtomValue(environmentCatalog.savedCatalogValueAtom).entries.get(environmentId)
++    ?.target.label;
++  const saved = overrides[environmentId] ?? "";
++  return (
++    <SettingsRow
++      title="Name on this device"
++      description={
++        saved === ""
++          ? "Your own name for this machine. It shows everywhere in this app, on this device only."
++          : `Shows in place of “${ownLabel ?? "the machine's own name"}” everywhere in this app, on this device only. Clear it to go back.`
++      }
++      control={
++        <DraftInput
++          size="sm"
++          className="w-full @min-[32rem]/settings-row:w-56"
++          aria-label="Name for this machine on this device"
++          maxLength={NAME_MAX_LENGTH}
++          placeholder={ownLabel ?? "Machine name"}
++          spellCheck={false}
++          value={saved}
++          onCommit={(next) => {
++            const { [environmentId]: _previous, ...others } = overrides;
++            const name = next.trim();
++            void updateClientSettings({
++              environmentLabelOverrides:
++                name === "" || name === ownLabel ? others : { ...others, [environmentId]: name },
++            });
++          }}
++        />
++      }
++    />
++  );
++}
+diff --git a/apps/web/src/connection/catalog.ts b/apps/web/src/connection/catalog.ts
+index 971fa891106fcabbe039ff4591ef1709d37fcfb6..3989baa926bafb6d74bfc57bcae806bb10502e01 100644
+--- a/apps/web/src/connection/catalog.ts
++++ b/apps/web/src/connection/catalog.ts
+@@ -1,5 +1,8 @@
+ import { createEnvironmentCatalogAtoms } from "@t3tools/client-runtime/state/connections";
+ 
++import { environmentLabelOverridesAtom } from "./environmentLabelOverrides";
+ import { connectionAtomRuntime } from "./runtime";
+ 
+-export const environmentCatalog = createEnvironmentCatalogAtoms(connectionAtomRuntime);
++export const environmentCatalog = createEnvironmentCatalogAtoms(connectionAtomRuntime, {
++  labelOverridesAtom: environmentLabelOverridesAtom,
++});
+diff --git a/apps/web/src/connection/environmentLabelOverrides.ts b/apps/web/src/connection/environmentLabelOverrides.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..9e7800dd04b687153c6f3b1ef6c06f38ee535e8b
+--- /dev/null
++++ b/apps/web/src/connection/environmentLabelOverrides.ts
+@@ -0,0 +1,8 @@
++import type { EnvironmentLabelOverrides } from "@t3tools/client-runtime/state/connections";
++import { Atom } from "effect/reactivity";
++
++/** Mirrors the client setting, so the catalog can read it without importing the settings store. */
++export const environmentLabelOverridesAtom = Atom.make<EnvironmentLabelOverrides>({}).pipe(
++  Atom.keepAlive,
++  Atom.withLabel("web-environment-label-overrides"),
++);
+diff --git a/apps/web/src/hooks/useSettings.ts b/apps/web/src/hooks/useSettings.ts
+index d5565f6a4fcc38e641bea128ce15f5db38434648..12a5660f05426110aa7e7ebe5d0a3224121e0f7d 100644
+--- a/apps/web/src/hooks/useSettings.ts
++++ b/apps/web/src/hooks/useSettings.ts
+@@ -50,6 +50,7 @@ import { AsyncResult, Atom } from "effect/reactivity";
+ import { toastManager } from "~/components/ui/toast";
+ import { isHostedStaticApp } from "~/hostedPairing";
+ import { environmentCatalog } from "~/connection/catalog";
++import { environmentLabelOverridesAtom } from "~/connection/environmentLabelOverrides";
+ import { primaryServerSettingsAtom, serverEnvironment } from "~/state/server";
+ import { useEnvironments, usePrimaryEnvironment } from "~/state/environments";
+ import { useAtomCommand } from "~/state/use-atom-command";
+@@ -94,8 +95,16 @@ function getClientSettingsSnapshot(): ClientSettings {
+   return clientSettingsSnapshot;
+ }
+ 
++/** The connection catalog reads machine names from an atom, so every surface follows a rename. */
++function publishEnvironmentLabelOverrides(settings: ClientSettings): void {
++  if (appAtomRegistry.get(environmentLabelOverridesAtom) !== settings.environmentLabelOverrides) {
++    appAtomRegistry.set(environmentLabelOverridesAtom, settings.environmentLabelOverrides);
++  }
++}
++
+ function replaceClientSettingsSnapshot(settings: ClientSettings): void {
+   clientSettingsSnapshot = settings;
++  publishEnvironmentLabelOverrides(settings);
+   emitClientSettingsChange();
+ }
+ 
+@@ -776,6 +785,7 @@ export function updateClientSettings(patch: ClientSettingsPatch): Promise<void>
+ export function __resetClientSettingsPersistenceForTests(): void {
+   clientSettingsHydrationGeneration += 1;
+   clientSettingsSnapshot = DEFAULT_CLIENT_SETTINGS;
++  publishEnvironmentLabelOverrides(DEFAULT_CLIENT_SETTINGS);
+   clientSettingsHydrationStatus = "pending";
+   clientSettingsHydrationPromise = null;
+   clientSettingsPersistenceQueue = Promise.resolve();
+@@ -789,6 +799,7 @@ export function __resetClientSettingsPersistenceForTests(): void {
+ export function __setClientSettingsForTests(settings: ClientSettings): void {
+   clientSettingsHydrationGeneration += 1;
+   clientSettingsSnapshot = settings;
++  publishEnvironmentLabelOverrides(settings);
+   clientSettingsHydrationStatus = "ready";
+   clientSettingsHydrationPromise = null;
+ }
+diff --git a/packages/client-runtime/src/state/connections.ts b/packages/client-runtime/src/state/connections.ts
+index 206f75a6004164473f7dd733342da0800c1ab49a..59ebf51369b23a215b8a4b836f520b4a38ce676c 100644
+--- a/packages/client-runtime/src/state/connections.ts
++++ b/packages/client-runtime/src/state/connections.ts
+@@ -40,8 +40,56 @@ const EMPTY_ENVIRONMENT_CATALOG_STATE: EnvironmentCatalogState = Object.freeze({
+   entries: new Map(),
+ });
+ 
++export type EnvironmentLabelOverrides = Readonly<Record<string, string>>;
++
++/**
++ * Shows each environment under the name this device gave it. An entry keeps its identity
++ * while its saved entry and its name stay the same, so readers that compare entries hold.
++ */
++export function createEnvironmentLabelOverrider() {
++  const renamed = new WeakMap<ConnectionCatalogEntry, ConnectionCatalogEntry>();
++  let previous: EnvironmentCatalogState = EMPTY_ENVIRONMENT_CATALOG_STATE;
++  return (
++    catalog: EnvironmentCatalogState,
++    overrides: EnvironmentLabelOverrides,
++  ): EnvironmentCatalogState => {
++    let changed = false;
++    const entries = new Map<EnvironmentIdType, ConnectionCatalogEntry>();
++    for (const [environmentId, entry] of catalog.entries) {
++      const label = overrides[environmentId]?.trim();
++      if (!label || label === entry.target.label) {
++        entries.set(environmentId, entry);
++        continue;
++      }
++      changed = true;
++      let next = renamed.get(entry);
++      if (next === undefined || next.target.label !== label) {
++        const target: ConnectionCatalogEntry["target"] = Object.assign(
++          Object.create(Object.getPrototypeOf(entry.target)),
++          entry.target,
++          { label },
++        );
++        next = { ...entry, target };
++        renamed.set(entry, next);
++      }
++      entries.set(environmentId, next);
++    }
++    if (!changed) return catalog;
++    const same =
++      previous.isReady === catalog.isReady &&
++      previous.entries.size === entries.size &&
++      [...entries].every(([environmentId, entry]) => previous.entries.get(environmentId) === entry);
++    if (!same) previous = { isReady: catalog.isReady, entries };
++    return previous;
++  };
++}
++
+ export function createEnvironmentCatalogAtoms<R, E>(
+   runtime: Atom.AtomRuntime<EnvironmentRegistry.EnvironmentRegistry | R, E>,
++  options?: {
++    /** Names this device shows in place of each environment's own, by environment id. */
++    readonly labelOverridesAtom?: Atom.Atom<EnvironmentLabelOverrides>;
++  },
+ ) {
+   const commandScheduler = createAtomCommandScheduler();
+   const serial = { mode: "serial" as const, key: () => "environment-catalog" };
+@@ -61,8 +109,17 @@ export function createEnvironmentCatalogAtoms<R, E>(
+     { initialValue: EMPTY_ENVIRONMENT_CATALOG_STATE },
+   );
+ 
+-  const catalogValueAtom = Atom.make((get) =>
++  /** The catalog as saved, under each environment's own name. */
++  const savedCatalogValueAtom = Atom.make((get) =>
+     AsyncResult.getOrElse(get(catalogAtom), () => EMPTY_ENVIRONMENT_CATALOG_STATE),
++  ).pipe(Atom.withLabel("environment-catalog-saved-value"));
++
++  const labelOverridesAtom = options?.labelOverridesAtom;
++  const overrideLabels = createEnvironmentLabelOverrider();
++  const catalogValueAtom = (
++    labelOverridesAtom === undefined
++      ? savedCatalogValueAtom
++      : Atom.make((get) => overrideLabels(get(savedCatalogValueAtom), get(labelOverridesAtom)))
+   ).pipe(Atom.withLabel("environment-catalog-value"));
+ 
+   const pullRequestRoutingPermissionsAtom = runtime.atom(
+@@ -195,6 +252,7 @@ export function createEnvironmentCatalogAtoms<R, E>(
+   return {
+     catalogAtom,
+     catalogValueAtom,
++    savedCatalogValueAtom,
+     pullRequestRoutingPermissionsValueAtom,
+     setPullRequestRoutingPermission,
+     networkStatusAtom,
+diff --git a/packages/client-runtime/src/state/environmentLabelOverrides.test.ts b/packages/client-runtime/src/state/environmentLabelOverrides.test.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..00d6c64765f0f11a00513705aa6cd53cc31d1dac
+--- /dev/null
++++ b/packages/client-runtime/src/state/environmentLabelOverrides.test.ts
+@@ -0,0 +1,79 @@
++import { describe, expect, it } from "@effect/vitest";
++import { EnvironmentId } from "@t3tools/contracts";
++import * as Option from "effect/Option";
++
++import type { ConnectionCatalogEntry } from "../connection/catalog.ts";
++import { RelayConnectionTarget } from "../connection/model.ts";
++import { createEnvironmentLabelOverrider, type EnvironmentCatalogState } from "./connections.ts";
++
++const DEV = EnvironmentId.make("env-dev");
++const CFH = EnvironmentId.make("env-cfh");
++
++function entry(environmentId: EnvironmentId, label: string): ConnectionCatalogEntry {
++  return {
++    target: new RelayConnectionTarget({ environmentId, label }),
++    enabled: true,
++    profile: Option.none(),
++  };
++}
++
++function catalog(...entries: ReadonlyArray<ConnectionCatalogEntry>): EnvironmentCatalogState {
++  return {
++    isReady: true,
++    entries: new Map(entries.map((item) => [item.target.environmentId, item])),
++  };
++}
++
++describe("createEnvironmentLabelOverrider", () => {
++  it("tells two machines with the same name apart", () => {
++    const override = createEnvironmentLabelOverrider();
++    const saved = catalog(entry(DEV, "research-box"), entry(CFH, "research-box"));
++
++    const shown = override(saved, { [DEV]: "slop dev", [CFH]: " slop cfh " });
++
++    expect(shown.entries.get(DEV)?.target.label).toBe("slop dev");
++    expect(shown.entries.get(CFH)?.target.label).toBe("slop cfh");
++    expect(shown.entries.get(DEV)?.target).toBeInstanceOf(RelayConnectionTarget);
++    expect(shown.entries.get(DEV)?.target.environmentId).toBe(DEV);
++    expect(saved.entries.get(DEV)?.target.label).toBe("research-box");
++  });
++
++  it("returns the saved catalog when no name applies", () => {
++    const override = createEnvironmentLabelOverrider();
++    const saved = catalog(entry(DEV, "research-box"));
++
++    expect(override(saved, {})).toBe(saved);
++    expect(override(saved, { [DEV]: "research-box" })).toBe(saved);
++    expect(override(saved, { [DEV]: "   " })).toBe(saved);
++    expect(override(saved, { "env-gone": "old laptop" })).toBe(saved);
++  });
++
++  it("keeps identities until an entry or its name changes", () => {
++    const override = createEnvironmentLabelOverrider();
++    const saved = catalog(entry(DEV, "research-box"), entry(CFH, "research-box"));
++
++    const first = override(saved, { [DEV]: "slop dev" });
++    expect(override(saved, { [DEV]: "slop dev" })).toBe(first);
++    expect(first.entries.get(CFH)).toBe(saved.entries.get(CFH));
++
++    const renamed = override(saved, { [DEV]: "slop" });
++    expect(renamed).not.toBe(first);
++    expect(renamed.entries.get(DEV)?.target.label).toBe("slop");
++
++    const cleared = override(saved, {});
++    expect(cleared).toBe(saved);
++  });
++
++  it("follows a saved entry that changes under a name", () => {
++    const override = createEnvironmentLabelOverrider();
++    const before = catalog(entry(DEV, "research-box"));
++    const after = catalog({ ...entry(DEV, "research-box-2"), enabled: false });
++
++    const first = override(before, { [DEV]: "slop dev" });
++    const second = override(after, { [DEV]: "slop dev" });
++
++    expect(second).not.toBe(first);
++    expect(second.entries.get(DEV)?.enabled).toBe(false);
++    expect(second.entries.get(DEV)?.target.label).toBe("slop dev");
++  });
++});
+diff --git a/packages/contracts/src/settings.ts b/packages/contracts/src/settings.ts
+index 8bb0ca4de7e8b88b1405a2a39b9c4d86c29b2348..864226dbcad9cdec958ad08cb6479cb4bf071715 100644
+--- a/packages/contracts/src/settings.ts
++++ b/packages/contracts/src/settings.ts
+@@ -550,6 +550,10 @@ export const ClientSettingsSchema = Schema.Struct({
+   sidebarHiddenEnvironmentIds: Schema.Array(TrimmedNonEmptyString).pipe(
+     Schema.withDecodingDefault(Effect.succeed([])),
+   ),
++  // Names this device shows for machines, by environment id, in place of the machine's own.
++  environmentLabelOverrides: Schema.Record(TrimmedNonEmptyString, TrimmedNonEmptyString).pipe(
++    Schema.withDecodingDefault(Effect.succeed({})),
++  ),
+   sidebarProjectGroupingMode: SidebarProjectGroupingMode.pipe(
+     Schema.withDecodingDefault(Effect.succeed(DEFAULT_SIDEBAR_PROJECT_GROUPING_MODE)),
+   ),
+@@ -2099,6 +2103,9 @@ export const ClientSettingsPatch = Schema.Struct({
+   threadDetailsItems: Schema.optionalKey(Schema.Record(Schema.String, Schema.Boolean)),
+   sidebarWorkingShelfEnabled: Schema.optionalKey(Schema.Boolean),
+   sidebarHiddenEnvironmentIds: Schema.optionalKey(Schema.Array(TrimmedNonEmptyString)),
++  environmentLabelOverrides: Schema.optionalKey(
++    Schema.Record(TrimmedNonEmptyString, TrimmedNonEmptyString),
++  ),
+   sidebarProjectGroupingMode: Schema.optionalKey(SidebarProjectGroupingMode),
+   sidebarProjectGroupingOverrides: Schema.optionalKey(
+     Schema.Record(TrimmedNonEmptyString, SidebarProjectGroupingMode),
