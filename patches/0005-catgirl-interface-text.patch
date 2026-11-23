@@ -1,0 +1,152 @@
+diff --git a/apps/web/src/components/T3Wordmark.tsx b/apps/web/src/components/T3Wordmark.tsx
+index d0882a5dd61e3c4dd8d0f0a63cc8044a949504e6..35123168852190926401ff134e9688e108a024e6 100644
+--- a/apps/web/src/components/T3Wordmark.tsx
++++ b/apps/web/src/components/T3Wordmark.tsx
+@@ -1,12 +1,14 @@
+ import type { SVGProps } from "react";
+ 
++/** The app's small mark: the cat head from the Catgirl Code icon. Keeps upstream's name so its uses need no change. */
+ export function T3Wordmark(props: SVGProps<SVGSVGElement>) {
+   return (
+-    <svg {...props} viewBox="15.5309 37 94.3941 56.96" xmlns="http://www.w3.org/2000/svg">
++    <svg {...props} viewBox="113 91 286 310" xmlns="http://www.w3.org/2000/svg">
+       <path
+-        d="M33.4509 93V47.56H15.5309V37H64.3309V47.56H46.4109V93H33.4509ZM86.7253 93.96C82.832 93.96 78.9653 93.4533 75.1253 92.44C71.2853 91.3733 68.032 89.88 65.3653 87.96L70.4053 78.04C72.5386 79.5867 75.0186 80.8133 77.8453 81.72C80.672 82.6267 83.5253 83.08 86.4053 83.08C89.6586 83.08 92.2186 82.44 94.0853 81.16C95.952 79.88 96.8853 78.12 96.8853 75.88C96.8853 73.7467 96.0586 72.0667 94.4053 70.84C92.752 69.6133 90.0853 69 86.4053 69H80.4853V60.44L96.0853 42.76L97.5253 47.4H68.1653V37H107.365V45.4L91.8453 63.08L85.2853 59.32H89.0453C95.9253 59.32 101.125 60.8667 104.645 63.96C108.165 67.0533 109.925 71.0267 109.925 75.88C109.925 79.0267 109.099 81.9867 107.445 84.76C105.792 87.48 103.259 89.6933 99.8453 91.4C96.432 93.1067 92.0586 93.96 86.7253 93.96Z"
++        d="M 126.04,232.73 L 154.09,103.79 Q 156.00,95.00 163.87,99.37 L 222.92,132.18 Z M 385.96,232.73 L 357.91,103.79 Q 356.00,95.00 348.13,99.37 L 289.08,132.18 Z"
+         fill="currentColor"
+       />
++      <circle cx="256" cy="261" r="133" fill="currentColor" />
+     </svg>
+   );
+ }
+diff --git a/apps/web/src/components/sidebar/SidebarChrome.tsx b/apps/web/src/components/sidebar/SidebarChrome.tsx
+index dd41ddd2a0213113428c5e8d380172fe2288d65a..c141446c13d8c16cfce06b3cfa7ec6933ec3a3bc 100644
+--- a/apps/web/src/components/sidebar/SidebarChrome.tsx
++++ b/apps/web/src/components/sidebar/SidebarChrome.tsx
+@@ -14,7 +14,6 @@ import {
+ import { primaryServerKeybindingsAtom } from "../../state/server";
+ import { cn } from "../../lib/utils";
+ import { usePullRequestsSupported } from "../../state/environments";
+-import { T3Wordmark } from "../T3Wordmark";
+ import {
+   resolveEnvironmentIdentificationPillLabel,
+   resolveSidebarStageBackdropVariant,
+@@ -180,14 +179,16 @@ function SidebarBrand({ onBackdrop }: { onBackdrop: boolean }) {
+ function SidebarBrandMark({ onBackdrop }: { onBackdrop: boolean }) {
+   return (
+     <span className="inline-flex min-w-0 items-baseline gap-1 text-sm font-medium tracking-tight">
+-      <T3Wordmark aria-label="T3" className="h-[1cap] w-auto shrink-0" />
++      <span className="shrink-0 font-semibold [text-box:trim-both_cap_alphabetic] supports-[text-box:trim-both_cap_alphabetic]:py-1">
++        Catgirl
++      </span>
+       <span
+         className={cn(
+           "truncate [text-box:trim-both_cap_alphabetic] supports-[text-box:trim-both_cap_alphabetic]:py-1",
+           onBackdrop ? "text-white/70" : "text-muted-foreground",
+         )}
+       >
+-        Code
++        Code :3
+       </span>
+     </span>
+   );
+diff --git a/apps/web/src/components/ui/standalone-page.tsx b/apps/web/src/components/ui/standalone-page.tsx
+index 0881b84c52f35ccc4668b47d8a191b668caedd28..df3263a89f032b92d8c03d5607db0bac5bb92b96 100644
+--- a/apps/web/src/components/ui/standalone-page.tsx
++++ b/apps/web/src/components/ui/standalone-page.tsx
+@@ -1,7 +1,5 @@
+ import type { ReactNode } from "react";
+ 
+-import { T3Wordmark } from "../T3Wordmark";
+-
+ export function StandalonePage({ children }: { readonly children: ReactNode }) {
+   return (
+     // The page owns scrolling because root cannot scroll; safe centering keeps oversized cards top-aligned.
+@@ -24,8 +22,8 @@ export function StandalonePageHeader({
+     <>
+       <div className="flex items-baseline justify-between gap-3 text-muted-foreground">
+         <span className="flex items-baseline gap-1.5" role="img" aria-label="T3 Code">
+-          <T3Wordmark className="h-3 w-auto shrink-0 text-foreground" aria-hidden />
+-          <span className="text-lg font-medium tracking-tight">Code</span>
++          <span className="text-lg font-semibold tracking-tight text-foreground">Catgirl</span>
++          <span className="text-lg font-medium tracking-tight">Code :3</span>
+         </span>
+         {context ? <span className="text-sm">{context}</span> : null}
+       </div>
+diff --git a/apps/web/vite.config.ts b/apps/web/vite.config.ts
+index dda4d1d2a8180d557922033c1915fd13b010da13..82b5d8decbfd3a96cf75b404f420b15e91648d1c 100644
+--- a/apps/web/vite.config.ts
++++ b/apps/web/vite.config.ts
+@@ -289,6 +289,23 @@ function bootstrapTitlePlugin(): Plugin {
+   };
+ }
+ 
++// Catgirl Code: renames the product in display text at build time, so upstream's strings need no
++// patching one by one and new ones are covered too. "T3 Chat" is a separate product and stays.
++// Tests run without it, so they still assert upstream's wording.
++function catgirlBrandingPlugin(): Plugin {
++  return {
++    name: "catgirl:branding",
++    enforce: "pre",
++    transform(code, id) {
++      const file = id.split("?")[0] ?? id;
++      if (file.includes("/node_modules/") || !/\.[cm]?[jt]sx?$/.test(file)) return null;
++      // \s+ also covers a name that JSX text wraps across two lines.
++      if (!/T3\s+(?:Code|Connect)\b/.test(code)) return null;
++      return { code: code.replace(/T3(\s+)(Code|Connect)\b/g, "Catgirl$1$2"), map: null };
++    },
++  };
++}
++
+ // Allow Tailnet hosts for sharing; Tailscale-controlled DNS prevents attacker rebinding.
+ const configuredAllowedHosts = (process.env.T3CODE_DEV_ALLOWED_HOSTS ?? "")
+   .split(",")
+@@ -316,6 +333,7 @@ export default defineConfig(({ command }) => {
+     },
+     assetsInclude: ["**/*.wasm"],
+     plugins: [
++      process.env.VITEST ? undefined : catgirlBrandingPlugin(),
+       bootstrapTitlePlugin(),
+       devCompressionPlugin(),
+       chunkCycleGuardPlugin(),
+diff --git a/scripts/build-desktop-artifact.ts b/scripts/build-desktop-artifact.ts
+index 2410a77ec15ac32bf54dc244ef294136e83a8834..906bf8b65c5497767cc1d61223caf918cf46ed49 100644
+--- a/scripts/build-desktop-artifact.ts
++++ b/scripts/build-desktop-artifact.ts
+@@ -3005,9 +3005,35 @@ export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
+     buildConfig.win = winConfig;
+   }
+ 
+-  return buildConfig;
++  return rebrandDisplayText(buildConfig);
+ });
+ 
++// Catgirl Code: renames the product in packaging text such as the macOS permission prompts.
++// Identifiers (app id, executable and artifact names, URL schemes) do not contain the phrase.
++function rebrandDisplayText<T>(value: T): T {
++  if (typeof value === "string") {
++    return value.replaceAll("T3 Code", "Catgirl Code") as T;
++  }
++  if (Array.isArray(value)) {
++    return value.map(rebrandDisplayText) as T;
++  }
++  // Plain objects only: class instances such as redacted secrets pass through untouched.
++  if (
++    typeof value === "object" &&
++    value !== null &&
++    Object.getPrototypeOf(value) === Object.prototype
++  ) {
++    return Object.fromEntries(
++      Object.entries(value).map(([key, entry]) => [
++        key,
++        // The bundle name is resolved elsewhere too (resolveDesktopProductName), so it stays as given.
++        key === "productName" ? entry : rebrandDisplayText(entry),
++      ]),
++    ) as T;
++  }
++  return value;
++}
++
+ const assertPlatformBuildResources = Effect.fn("assertPlatformBuildResources")(function* (
+   platform: typeof BuildPlatform.Type,
+   stageResourcesDir: string,
