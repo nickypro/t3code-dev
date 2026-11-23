@@ -20,7 +20,7 @@ index d0882a5dd61e3c4dd8d0f0a63cc8044a949504e6..35123168852190926401ff134e9688e1
    );
  }
 diff --git a/apps/web/src/components/sidebar/SidebarChrome.tsx b/apps/web/src/components/sidebar/SidebarChrome.tsx
-index dd41ddd2a0213113428c5e8d380172fe2288d65a..c201f4b35d4214e890bd90e9d6f1eac2522c5048 100644
+index dd41ddd2a0213113428c5e8d380172fe2288d65a..ab5d29b6b78f003fe14f398ea5409ec9d421cdd3 100644
 --- a/apps/web/src/components/sidebar/SidebarChrome.tsx
 +++ b/apps/web/src/components/sidebar/SidebarChrome.tsx
 @@ -14,7 +14,6 @@ import {
@@ -31,44 +31,25 @@ index dd41ddd2a0213113428c5e8d380172fe2288d65a..c201f4b35d4214e890bd90e9d6f1eac2
  import {
    resolveEnvironmentIdentificationPillLabel,
    resolveSidebarStageBackdropVariant,
-@@ -113,7 +112,7 @@ export function SidebarBrandWidthProbe({
-       ref={observeWidth}
-     >
-       <div className="ml-[var(--workspace-titlebar-content-left)] flex gap-1">
--        <SidebarBrandMark onBackdrop={false} />
-+        <SidebarBrandMark />
-         {isElectron ? <div className="w-[calc(2*var(--workspace-titlebar-control-size))]" /> : null}
-       </div>
-     </div>
-@@ -172,22 +171,17 @@ function SidebarBrand({ onBackdrop }: { onBackdrop: boolean }) {
-       )}
-       to="/"
-     >
--      <SidebarBrandMark onBackdrop={onBackdrop} />
-+      <SidebarBrandMark />
-     </Link>
-   );
+@@ -178,12 +177,15 @@ function SidebarBrand({ onBackdrop }: { onBackdrop: boolean }) {
  }
  
--function SidebarBrandMark({ onBackdrop }: { onBackdrop: boolean }) {
-+function SidebarBrandMark() {
-+  // Just "Catgirl": a longer title raises the sidebar's minimum width and pushes the header along.
+ function SidebarBrandMark({ onBackdrop }: { onBackdrop: boolean }) {
++  // "Cat Code" is as wide as upstream's mark: a longer title raises the sidebar's minimum width.
    return (
 -    <span className="inline-flex min-w-0 items-baseline gap-1 text-sm font-medium tracking-tight">
 -      <T3Wordmark aria-label="T3" className="h-[1cap] w-auto shrink-0" />
--      <span
--        className={cn(
++    <span className="inline-flex min-w-0 items-baseline gap-1 text-sm tracking-tight">
++      <span className="shrink-0 font-bold [text-box:trim-both_cap_alphabetic] supports-[text-box:trim-both_cap_alphabetic]:py-1">
++        Cat
++      </span>
+       <span
+         className={cn(
 -          "truncate [text-box:trim-both_cap_alphabetic] supports-[text-box:trim-both_cap_alphabetic]:py-1",
--          onBackdrop ? "text-white/70" : "text-muted-foreground",
--        )}
--      >
--        Code
-+    <span className="inline-flex min-w-0 items-baseline text-sm font-semibold tracking-tight">
-+      <span className="truncate [text-box:trim-both_cap_alphabetic] supports-[text-box:trim-both_cap_alphabetic]:py-1">
-+        Catgirl
-       </span>
-     </span>
-   );
++          "truncate font-medium [text-box:trim-both_cap_alphabetic] supports-[text-box:trim-both_cap_alphabetic]:py-1",
+           onBackdrop ? "text-white/70" : "text-muted-foreground",
+         )}
+       >
 diff --git a/apps/web/src/components/ui/standalone-page.tsx b/apps/web/src/components/ui/standalone-page.tsx
 index 0881b84c52f35ccc4668b47d8a191b668caedd28..df3263a89f032b92d8c03d5607db0bac5bb92b96 100644
 --- a/apps/web/src/components/ui/standalone-page.tsx
