@@ -1,0 +1,215 @@
+diff --git a/apps/desktop/package.json b/apps/desktop/package.json
+index 97554fd82320524ccf43a751a45e035823782d2d..797e48f57d7f4d9737f037d96b22a5290fc294e5 100644
+--- a/apps/desktop/package.json
++++ b/apps/desktop/package.json
+@@ -41,5 +41,5 @@
+     "tailwindcss": "^4.0.0",
+     "vite-plus": "catalog:"
+   },
+-  "productName": "T3 Code (Beta)"
++  "productName": "Catgirl Code"
+ }
+diff --git a/apps/desktop/resources/mac/en.lproj/InfoPlist.strings b/apps/desktop/resources/mac/en.lproj/InfoPlist.strings
+new file mode 100644
+index 0000000000000000000000000000000000000000..8d9fface24881ac5e44a8e505a1004ab281cda31
+--- /dev/null
++++ b/apps/desktop/resources/mac/en.lproj/InfoPlist.strings
+@@ -0,0 +1,2 @@
++"CFBundleDisplayName" = "Catgirl Code :3";
++"CFBundleName" = "Catgirl Code :3";
+diff --git a/apps/desktop/src/app/DesktopAppIdentity.test.ts b/apps/desktop/src/app/DesktopAppIdentity.test.ts
+index 74d134c0b1001988c168f07fb729bdc16b03c09a..96229a23dca2e1477b536e106fe0151fc238e943 100644
+--- a/apps/desktop/src/app/DesktopAppIdentity.test.ts
++++ b/apps/desktop/src/app/DesktopAppIdentity.test.ts
+@@ -200,9 +200,12 @@ describe("DesktopAppIdentity", () => {
+ 
+         const runtimeName = calls.setName[0];
+         assert.isDefined(runtimeName);
+-        assert.equal(runtimeName, `T3 Code ${stage}`);
++        assert.equal(runtimeName, `Catgirl Code ${stage}`);
+         assert.match(runtimeName.replaceAll(" ", ""), /^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/);
+-        assert.equal(calls.setAboutPanelOptions[0]?.applicationName, `T3 Code (${stage})`);
++        assert.equal(
++          calls.setAboutPanelOptions[0]?.applicationName,
++          stage === "Beta" ? "Catgirl Code :3" : `Catgirl Code (${stage})`,
++        );
+       }),
+       { calls, environment },
+     );
+diff --git a/apps/desktop/src/app/DesktopEnvironment.ts b/apps/desktop/src/app/DesktopEnvironment.ts
+index d5fed4b228b6f63c3637f34d8aec5d267626196b..bdd2180486cdf77703a15ab33a8ad8935a39c256 100644
+--- a/apps/desktop/src/app/DesktopEnvironment.ts
++++ b/apps/desktop/src/app/DesktopEnvironment.ts
+@@ -85,7 +85,7 @@ export class DesktopEnvironment extends Context.Service<
+   }
+ >()("@t3tools/desktop/app/DesktopEnvironment") {}
+ 
+-const APP_BASE_NAME = "T3 Code";
++const APP_BASE_NAME = "Catgirl Code";
+ 
+ function resolveDesktopAppStageLabel(input: {
+   readonly isDevelopment: boolean;
+@@ -106,7 +106,8 @@ export function resolveDesktopAppBranding(input: {
+   return {
+     baseName: APP_BASE_NAME,
+     stageLabel,
+-    displayName: `${APP_BASE_NAME} (${stageLabel})`,
++    // The regular build is "Catgirl Code :3"; other stages keep their label.
++    displayName: stageLabel === "Beta" ? `${APP_BASE_NAME} :3` : `${APP_BASE_NAME} (${stageLabel})`,
+   };
+ }
+ 
+diff --git a/apps/desktop/src/app/DesktopPreReadyPlatform.test.ts b/apps/desktop/src/app/DesktopPreReadyPlatform.test.ts
+index 45887a928abb7f89b3c8f3c1425f814845658b27..1603e5627c0ce15d33d76fe952ea6db9fb5a0152 100644
+--- a/apps/desktop/src/app/DesktopPreReadyPlatform.test.ts
++++ b/apps/desktop/src/app/DesktopPreReadyPlatform.test.ts
+@@ -169,7 +169,7 @@ describe("DesktopPreReadyPlatform", () => {
+         const identity = yield* Effect.promise(() => portalIdentity);
+         assert.equal(identity.desktopName, "com.t3tools.T3Code.desktop");
+         assert.include(identity.desktopEntry ?? "", "Exec=/Applications/current.AppImage %U");
+-        assert.include(identity.desktopEntry ?? "", "Name=T3 Code (Beta)");
++        assert.include(identity.desktopEntry ?? "", "Name=Catgirl Code :3");
+         assert.include(identity.desktopEntry ?? "", "MimeType=x-scheme-handler/t3code;");
+         assert.include(
+           identity.desktopEntry ?? "",
+diff --git a/apps/mobile/app.config.ts b/apps/mobile/app.config.ts
+index a4d34fc527aff3d937ee70497a9f2cd32a4b8e47..fcecc0272b741bcb18c2638aadaf6b0fa681f913 100644
+--- a/apps/mobile/app.config.ts
++++ b/apps/mobile/app.config.ts
+@@ -79,7 +79,7 @@ const RELEASE_ASSETS = {
+ 
+ const VARIANT_CONFIG = {
+   development: {
+-    appName: "T3 Code Dev",
++    appName: "Catgirl Code Dev",
+     scheme: "t3code-dev",
+     iosBundleIdentifier: "com.t3tools.t3code.dev",
+     androidPackage: "com.t3tools.t3code.dev",
+@@ -87,7 +87,7 @@ const VARIANT_CONFIG = {
+     assets: DEVELOPMENT_ASSETS,
+   },
+   preview: {
+-    appName: "T3 Code Preview",
++    appName: "Catgirl Code :3",
+     scheme: "t3code-preview",
+     iosBundleIdentifier: "com.t3tools.t3code.preview",
+     androidPackage: "com.t3tools.t3code.preview",
+@@ -95,7 +95,7 @@ const VARIANT_CONFIG = {
+     assets: PREVIEW_ASSETS,
+   },
+   production: {
+-    appName: "T3 Code",
++    appName: "Catgirl Code :3",
+     scheme: "t3code",
+     iosBundleIdentifier: "com.t3tools.t3code",
+     androidPackage: "com.t3tools.t3code",
+diff --git a/apps/web/index.html b/apps/web/index.html
+index 051e3090a5d48f880323cafdb75ae6e9e739e799..ebe80d677814744adc027e45478fffa92907a698 100644
+--- a/apps/web/index.html
++++ b/apps/web/index.html
+@@ -681,13 +681,13 @@
+       if (desktopDisplayName) document.title = desktopDisplayName;
+     </script>
+     <!-- vite.config.ts stamps the web build's channel into this title. -->
+-    <title>T3 Code</title>
++    <title>Catgirl Code :3</title>
+   </head>
+   <body>
+     <div id="root">
+       <div id="boot-shell">
+-        <div id="boot-shell-card" aria-label="T3 Code splash screen">
+-          <img id="boot-shell-logo" src="/apple-touch-icon.png" alt="T3 Code" />
++        <div id="boot-shell-card" aria-label="Catgirl Code splash screen">
++          <img id="boot-shell-logo" src="/apple-touch-icon.png" alt="Catgirl Code" />
+         </div>
+       </div>
+     </div>
+diff --git a/apps/web/public/manifest.webmanifest b/apps/web/public/manifest.webmanifest
+index 26d1c2e0d38a0557683973879497501223f522cd..7e7523e5a7bbb2b363d112c76e84383236d423d6 100644
+--- a/apps/web/public/manifest.webmanifest
++++ b/apps/web/public/manifest.webmanifest
+@@ -1,7 +1,7 @@
+ {
+   "id": "/",
+-  "name": "T3 Code",
+-  "short_name": "T3 Code",
++  "name": "Catgirl Code :3",
++  "short_name": "Catgirl Code",
+   "start_url": "/",
+   "scope": "/",
+   "display": "standalone",
+diff --git a/apps/web/src/branding.logic.ts b/apps/web/src/branding.logic.ts
+index f53103d904ad0545fbd377ff9aab31a873554c72..26de44cc19efb27311a955c7a4fa0afea11ddfff 100644
+--- a/apps/web/src/branding.logic.ts
++++ b/apps/web/src/branding.logic.ts
+@@ -4,9 +4,14 @@ export function formatAppDisplayName(input: {
+   readonly baseName: string;
+   readonly stageLabel: string;
+ }): string {
+-  if (input.stageLabel.trim().toLowerCase() === "latest") {
++  const stage = input.stageLabel.trim().toLowerCase();
++  if (stage === "latest") {
+     return input.baseName;
+   }
++  // The regular build is "Catgirl Code :3"; other stages keep their label.
++  if (stage === "beta") {
++    return `${input.baseName} :3`;
++  }
+ 
+   return `${input.baseName} (${input.stageLabel})`;
+ }
+diff --git a/apps/web/src/branding.ts b/apps/web/src/branding.ts
+index bf5b76f0dd1b7a4dd698ea943eaa0cc0520c2b82..9cf19f0f9795e1cabbdf7e5214dead9a1d5ae7f5 100644
+--- a/apps/web/src/branding.ts
++++ b/apps/web/src/branding.ts
+@@ -19,7 +19,7 @@ const hostedAppChannel = import.meta.env.VITE_HOSTED_APP_CHANNEL?.trim().toLower
+ export const HOSTED_APP_CHANNEL =
+   hostedAppChannel === "latest" || hostedAppChannel === "nightly" ? hostedAppChannel : null;
+ export const HOSTED_APP_CHANNEL_LABEL = resolveHostedAppChannelLabel(HOSTED_APP_CHANNEL);
+-export const APP_BASE_NAME = injectedDesktopAppBranding?.baseName ?? "T3 Code";
++export const APP_BASE_NAME = injectedDesktopAppBranding?.baseName ?? "Catgirl Code";
+ export const APP_STAGE_LABEL =
+   injectedDesktopAppBranding?.stageLabel ??
+   resolveWebAppStageLabel({
+diff --git a/apps/web/vite.config.ts b/apps/web/vite.config.ts
+index 83847db8c00a0ddf19cf4b47bddddd440fd0568d..dda4d1d2a8180d557922033c1915fd13b010da13 100644
+--- a/apps/web/vite.config.ts
++++ b/apps/web/vite.config.ts
+@@ -283,7 +283,7 @@ function bootstrapTitlePlugin(): Plugin {
+         hostedAppChannel: configuredHostedAppChannel,
+         development,
+       });
+-      const title = formatAppDisplayName({ baseName: "T3 Code", stageLabel });
++      const title = formatAppDisplayName({ baseName: "Catgirl Code", stageLabel });
+       return html.replace(/<title>[^<]*<\/title>/, `<title>${title}</title>`);
+     },
+   };
+diff --git a/scripts/build-desktop-artifact.ts b/scripts/build-desktop-artifact.ts
+index 9d34e2412b327f03f20f88385ee835209ffa3b6b..2410a77ec15ac32bf54dc244ef294136e83a8834 100644
+--- a/scripts/build-desktop-artifact.ts
++++ b/scripts/build-desktop-artifact.ts
+@@ -2836,11 +2836,24 @@ export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
+   if (platform === "mac") {
+     const path = yield* Path.Path;
+     const repoRoot = yield* RepoRoot;
++    if (resolveDesktopUpdateChannel(version) !== "nightly") {
++      buildConfig.extraResources = [
++        ...(buildConfig.extraResources as ReadonlyArray<unknown>),
++        {
++          from: path.join(repoRoot, "apps/desktop/resources/mac/en.lproj/InfoPlist.strings"),
++          to: "en.lproj/InfoPlist.strings",
++        },
++      ];
++    }
+     buildConfig.mac = {
+       target: target === "dmg" ? [target, "zip"] : [target],
+       icon: "icon.icns",
+       category: "public.app-category.developer-tools",
+       extendInfo: {
++        // A ":" in a bundle's file name shows as "/" in Finder, so the bundle is "Catgirl Code.app"
++        // and en.lproj/InfoPlist.strings supplies the displayed "Catgirl Code :3".
++        CFBundleDisplayName: resolveDesktopProductName(version),
++        LSHasLocalizedDisplayName: true,
+         // macOS 26 offers Messages/Mail codes in every text field unless opted out.
+         NSAutoFillRequiresTextContentTypeForOneTimeCodeOnMac: true,
+         NSLocalNetworkUsageDescription:
