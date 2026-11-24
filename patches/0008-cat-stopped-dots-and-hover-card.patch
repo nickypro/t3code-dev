@@ -94,7 +94,7 @@ index 429d0e4c4b4bfe9e953f8c2a53703da1cce49b24..b7e91600d518fc07f5bd8becd47c60e8
      bodies.set(rootThreadId, body);
    }
 diff --git a/apps/web/src/components/sidebar/SidebarCatFleet.tsx b/apps/web/src/components/sidebar/SidebarCatFleet.tsx
-index a27b4010a07d31cc45b41b626a4604173eb27a2c..0534775f9f210d677f0476c6e26f79e8f431d2b2 100644
+index a27b4010a07d31cc45b41b626a4604173eb27a2c..7e7510a962c710d8bf6f3eeee7db09e0fdcf927c 100644
 --- a/apps/web/src/components/sidebar/SidebarCatFleet.tsx
 +++ b/apps/web/src/components/sidebar/SidebarCatFleet.tsx
 @@ -3,11 +3,12 @@ import { memo, useId } from "react";
@@ -116,9 +116,9 @@ index a27b4010a07d31cc45b41b626a4604173eb27a2c..0534775f9f210d677f0476c6e26f79e8
  const SUBAGENT = { size: 2.2, radius: 4.8, period: 3.2, max: 3 };
  const MOON_COLORS = ["var(--color-cat-pink)", "var(--color-cat-cream)", "var(--color-cat-peach)"];
  const MAX_BODIES = 14;
-+// Stopped threads lie scattered under the cat's chin, as far out as this and this deep.
-+const SCATTER = { halfWidth: 14, gap: 2.2, depth: 4.5, floor: 30.5 };
-+const MAX_STOPPED = 16;
++// Stopped threads rest on the underside of the cat: a row along its outline, then a second one.
++const RESTING = { size: 3.4, perRow: 9, maxStep: 16, arc: 140, wobble: 2.5 };
++const MAX_STOPPED = 2 * RESTING.perRow;
 +const CARD_ROWS = 8;
  const POINT = "absolute top-0 left-0 size-0";
  const UNSQUASH = `scaleY(${1 / ORBIT_SQUASH})`;
@@ -127,7 +127,7 @@ index a27b4010a07d31cc45b41b626a4604173eb27a2c..0534775f9f210d677f0476c6e26f79e8
 - * Every machine as a cat planet. A running thread is a moon in orbit, a stopped one is a ring
 - * frozen where it stopped, and a running sub-agent circles the thread that started it.
 + * Every machine as a cat planet. A running thread is a moon in orbit, a stopped one is a dim
-+ * ring lying under the cat, and a running sub-agent circles the thread that started it.
++ * ring resting on the underside of the cat, and a running sub-agent circles the thread that started it.
   */
  export const SidebarCatFleet = memo(function SidebarCatFleet({
    machines,
@@ -252,25 +252,25 @@ index a27b4010a07d31cc45b41b626a4604173eb27a2c..0534775f9f210d677f0476c6e26f79e8
 +}
 +
 +/**
-+ * A stopped thread, lying under the cat. The dots spread evenly from side to side so they do not
-+ * stack, and each one's own key nudges it, so the row looks scattered and not ruled.
++ * A stopped thread, resting on the cat. The dots touch its outline from below, gathered at the
++ * lowest point, and each one's own key nudges it so the row does not look ruled.
 + */
 +function StoppedDot({ body, index, total }: { body: CatFleetBody; index: number; total: number }) {
-+  const step = (2 * SCATTER.halfWidth) / total;
-+  const x = (index + 0.5 + (fleetHashUnit(body.key) - 0.5) * 0.7) * step - SCATTER.halfWidth;
-+  // Under the head the dots follow the chin. Beside it they rest on the same floor.
-+  const chin = HEAD.y + Math.sqrt(Math.max(0, HEAD.radius ** 2 - x ** 2));
-+  const y =
-+    Math.max(chin + SCATTER.gap, SCATTER.floor) +
-+    fleetHashUnit(`${body.key}:depth`) * SCATTER.depth;
++  const row = Math.floor(index / RESTING.perRow);
++  const inRow = Math.min(total - row * RESTING.perRow, RESTING.perRow);
++  const place = (index % RESTING.perRow) - (inRow - 1) / 2;
++  const step = Math.min(RESTING.maxStep, RESTING.arc / inRow);
++  const wobble = (fleetHashUnit(body.key) - 0.5) * RESTING.wobble;
++  const angle = ((90 + place * step + wobble) * Math.PI) / 180;
++  const distance = HEAD.radius + RESTING.size * (0.5 + row * 0.95);
 +  return (
 +    <span
 +      className="pointer-events-none absolute z-[1] rounded-full border border-current opacity-60"
 +      style={{
-+        left: HEAD.x + x - STOPPED_SIZE / 2,
-+        top: y - STOPPED_SIZE / 2,
-+        width: STOPPED_SIZE,
-+        height: STOPPED_SIZE,
++        left: HEAD.x + distance * Math.cos(angle) - RESTING.size / 2,
++        top: HEAD.y + distance * Math.sin(angle) - RESTING.size / 2,
++        width: RESTING.size,
++        height: RESTING.size,
 +      }}
 +    />
 +  );
