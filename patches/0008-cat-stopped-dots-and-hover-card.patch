@@ -94,7 +94,7 @@ index 429d0e4c4b4bfe9e953f8c2a53703da1cce49b24..b7e91600d518fc07f5bd8becd47c60e8
      bodies.set(rootThreadId, body);
    }
 diff --git a/apps/web/src/components/sidebar/SidebarCatFleet.tsx b/apps/web/src/components/sidebar/SidebarCatFleet.tsx
-index a27b4010a07d31cc45b41b626a4604173eb27a2c..043f5fc03f43ee96b68403fcbd2047478f043e18 100644
+index a27b4010a07d31cc45b41b626a4604173eb27a2c..0534775f9f210d677f0476c6e26f79e8f431d2b2 100644
 --- a/apps/web/src/components/sidebar/SidebarCatFleet.tsx
 +++ b/apps/web/src/components/sidebar/SidebarCatFleet.tsx
 @@ -3,11 +3,12 @@ import { memo, useId } from "react";
@@ -112,28 +112,13 @@ index a27b4010a07d31cc45b41b626a4604173eb27a2c..043f5fc03f43ee96b68403fcbd204747
  const HEAD = { x: 33, y: 20.5, radius: 11.5 };
  const HEAD_SCALE = HEAD.radius / 133;
  const HEAD_VIEW_BOX = `${256 - HEAD.x / HEAD_SCALE} ${261 - HEAD.y / HEAD_SCALE} ${PLANET.width / HEAD_SCALE} ${PLANET.height / HEAD_SCALE}`;
-@@ -24,12 +25,31 @@ const STOPPED_SIZE = 4.2;
+@@ -24,12 +25,16 @@ const STOPPED_SIZE = 4.2;
  const SUBAGENT = { size: 2.2, radius: 4.8, period: 3.2, max: 3 };
  const MOON_COLORS = ["var(--color-cat-pink)", "var(--color-cat-cream)", "var(--color-cat-peach)"];
  const MAX_BODIES = 14;
-+// The nest under the cat, in planet pixels. Eggs fill it from the bottom row up.
-+const NEST = {
-+  bowl: "M 21.6 32.4 Q 33 35.4 44.4 32.4 Q 43.6 40.6 33 40.6 Q 22.4 40.6 21.6 32.4 Z",
-+  twigs: [
-+    "M 23 35 Q 29 38.4 37 38",
-+    "M 27 39.6 Q 36 39.8 43 35",
-+    "M 24 37.6 Q 32 36.6 42 37.6",
-+    "M 20.6 32.6 L 24 34",
-+    "M 45.6 32.4 L 42 34.2",
-+  ],
-+  rows: [
-+    { y: 32, eggs: 5 },
-+    { y: 29.3, eggs: 4 },
-+    { y: 26.7, eggs: 3 },
-+  ],
-+  eggSpacing: 3.7,
-+};
-+const MAX_EGGS = NEST.rows.reduce((total, row) => total + row.eggs, 0);
++// Stopped threads lie scattered under the cat's chin, as far out as this and this deep.
++const SCATTER = { halfWidth: 14, gap: 2.2, depth: 4.5, floor: 30.5 };
++const MAX_STOPPED = 16;
 +const CARD_ROWS = 8;
  const POINT = "absolute top-0 left-0 size-0";
  const UNSQUASH = `scaleY(${1 / ORBIT_SQUASH})`;
@@ -141,12 +126,12 @@ index a27b4010a07d31cc45b41b626a4604173eb27a2c..043f5fc03f43ee96b68403fcbd204747
  /**
 - * Every machine as a cat planet. A running thread is a moon in orbit, a stopped one is a ring
 - * frozen where it stopped, and a running sub-agent circles the thread that started it.
-+ * Every machine as a cat planet. A running thread is a moon in orbit, a stopped one is an egg in
-+ * the nest under the cat, and a running sub-agent circles the thread that started it.
++ * Every machine as a cat planet. A running thread is a moon in orbit, a stopped one is a dim
++ * ring lying under the cat, and a running sub-agent circles the thread that started it.
   */
  export const SidebarCatFleet = memo(function SidebarCatFleet({
    machines,
-@@ -38,11 +58,14 @@ export const SidebarCatFleet = memo(function SidebarCatFleet({
+@@ -38,11 +43,14 @@ export const SidebarCatFleet = memo(function SidebarCatFleet({
  }) {
    if (machines.length === 0) return null;
    return (
@@ -166,7 +151,7 @@ index a27b4010a07d31cc45b41b626a4604173eb27a2c..043f5fc03f43ee96b68403fcbd204747
    );
  });
  
-@@ -55,9 +78,21 @@ function describeMachine(machine: CatFleetMachine): string {
+@@ -55,9 +63,21 @@ function describeMachine(machine: CatFleetMachine): string {
    return `${running} running${subagentNote}, ${machine.bodies.length - running} stopped`;
  }
  
@@ -185,11 +170,11 @@ index a27b4010a07d31cc45b41b626a4604173eb27a2c..043f5fc03f43ee96b68403fcbd204747
 -  const bodies = machine.offline ? [] : machine.bodies.slice(0, MAX_BODIES);
 +  const shown = machine.offline ? [] : machine.bodies;
 +  const bodies = shown.filter(isInOrbit).slice(0, MAX_BODIES);
-+  const eggs = Math.min(shown.length - shown.filter(isInOrbit).length, MAX_EGGS);
++  const stopped = shown.filter((body) => !isInOrbit(body)).slice(0, MAX_STOPPED);
    const speed = 0.9 + fleetHashUnit(machine.environmentId) * 0.3;
    const summary = describeMachine(machine);
    const fill = machine.offline ? "currentColor" : `url(#${gradientId})`;
-@@ -68,7 +103,7 @@ function CatPlanet({ machine }: { machine: CatFleetMachine }) {
+@@ -68,7 +88,7 @@ function CatPlanet({ machine }: { machine: CatFleetMachine }) {
          render={
            <div
              aria-label={`${machine.label}: ${summary}`}
@@ -198,15 +183,17 @@ index a27b4010a07d31cc45b41b626a4604173eb27a2c..043f5fc03f43ee96b68403fcbd204747
              role="img"
              style={{ width: PLANET.width }}
            />
-@@ -108,6 +143,7 @@ function CatPlanet({ machine }: { machine: CatFleetMachine }) {
+@@ -108,6 +128,9 @@ function CatPlanet({ machine }: { machine: CatFleetMachine }) {
              />
              <circle cx="256" cy="261" fill={fill} r="133" />
            </svg>
-+          {eggs > 0 ? <Nest eggs={eggs} /> : null}
++          {stopped.map((body, index) => (
++            <StoppedDot body={body} index={index} key={body.key} total={stopped.length} />
++          ))}
            <OrbitLayer side="front" bodies={bodies} speed={speed} />
          </div>
          <span
-@@ -119,13 +155,105 @@ function CatPlanet({ machine }: { machine: CatFleetMachine }) {
+@@ -119,13 +142,82 @@ function CatPlanet({ machine }: { machine: CatFleetMachine }) {
            {machine.label}
          </span>
        </TooltipTrigger>
@@ -231,30 +218,28 @@ index a27b4010a07d31cc45b41b626a4604173eb27a2c..043f5fc03f43ee96b68403fcbd204747
    );
  }
  
-+/** One thread in a cat's card, marked the way it is drawn: a moon if running, an egg if not. */
++/** One thread in a cat's card, marked the way it is drawn: a moon if running, a ring if not. */
 +function CardRow({ body }: { body: CatFleetBody }) {
 +  const color = moonColor(body.key);
 +  return (
 +    <div className="flex min-w-0 items-center gap-2">
 +      <span className="flex w-3 shrink-0 justify-center">
-+        <span
-+          className="rounded-full"
-+          style={
-+            body.running
-+              ? {
-+                  width: 6,
-+                  height: 6,
-+                  background: color,
-+                  boxShadow: `0 0 4px 1px color-mix(in srgb, ${color} 60%, transparent)`,
-+                }
-+              : {
-+                  width: 5,
-+                  height: 6.5,
-+                  background: "var(--color-cat-cream)",
-+                  boxShadow: "0 0 0 0.8px var(--color-cat-shade)",
-+                }
-+          }
-+        />
++        {body.running ? (
++          <span
++            className="rounded-full"
++            style={{
++              width: 6,
++              height: 6,
++              background: color,
++              boxShadow: `0 0 4px 1px color-mix(in srgb, ${color} 60%, transparent)`,
++            }}
++          />
++        ) : (
++          <span
++            className="rounded-full border border-current opacity-60"
++            style={{ width: 6, height: 6 }}
++          />
++        )}
 +      </span>
 +      <div className="min-w-0 truncate text-foreground/75">{body.title || "New thread"}</div>
 +      {body.subagents > 0 ? (
@@ -266,56 +251,35 @@ index a27b4010a07d31cc45b41b626a4604173eb27a2c..043f5fc03f43ee96b68403fcbd204747
 +  );
 +}
 +
-+/** Stopped threads, one egg each, piled in a twig nest under the cat. */
-+function Nest({ eggs }: { eggs: number }) {
-+  const placed = NEST.rows.flatMap((row, rowIndex) => {
-+    const below = NEST.rows.slice(0, rowIndex).reduce((total, lower) => total + lower.eggs, 0);
-+    const count = Math.max(0, Math.min(eggs - below, row.eggs));
-+    return Array.from({ length: count }, (_, index) => ({
-+      x: HEAD.x + (index - (count - 1) / 2) * NEST.eggSpacing,
-+      y: row.y,
-+      lean: index % 2 === 0 ? -7 : 7,
-+    }));
-+  });
++/**
++ * A stopped thread, lying under the cat. The dots spread evenly from side to side so they do not
++ * stack, and each one's own key nudges it, so the row looks scattered and not ruled.
++ */
++function StoppedDot({ body, index, total }: { body: CatFleetBody; index: number; total: number }) {
++  const step = (2 * SCATTER.halfWidth) / total;
++  const x = (index + 0.5 + (fleetHashUnit(body.key) - 0.5) * 0.7) * step - SCATTER.halfWidth;
++  // Under the head the dots follow the chin. Beside it they rest on the same floor.
++  const chin = HEAD.y + Math.sqrt(Math.max(0, HEAD.radius ** 2 - x ** 2));
++  const y =
++    Math.max(chin + SCATTER.gap, SCATTER.floor) +
++    fleetHashUnit(`${body.key}:depth`) * SCATTER.depth;
 +  return (
-+    <svg
-+      aria-hidden="true"
-+      className="pointer-events-none absolute inset-0 z-[1] size-full overflow-visible"
-+      viewBox={`0 0 ${PLANET.width} ${PLANET.height}`}
-+    >
-+      {placed.map((egg) => (
-+        <ellipse
-+          cx={egg.x}
-+          cy={egg.y}
-+          fill="var(--color-cat-cream)"
-+          key={`${egg.x}:${egg.y}`}
-+          rx="1.55"
-+          ry="1.95"
-+          stroke="var(--color-cat-shade)"
-+          strokeWidth=".5"
-+          transform={`rotate(${egg.lean} ${egg.x} ${egg.y})`}
-+        />
-+      ))}
-+      <path d={NEST.bowl} fill="var(--color-cat-nest)" />
-+      {NEST.twigs.map((twig) => (
-+        <path
-+          d={twig}
-+          fill="none"
-+          key={twig}
-+          opacity=".8"
-+          stroke="var(--color-cat-twig)"
-+          strokeLinecap="round"
-+          strokeWidth=".7"
-+        />
-+      ))}
-+    </svg>
++    <span
++      className="pointer-events-none absolute z-[1] rounded-full border border-current opacity-60"
++      style={{
++        left: HEAD.x + x - STOPPED_SIZE / 2,
++        top: y - STOPPED_SIZE / 2,
++        width: STOPPED_SIZE,
++        height: STOPPED_SIZE,
++      }}
++    />
 +  );
 +}
 +
  /**
   * Each orbit is a flat circle squashed and tilted by one static transform; only rotations
   * animate, so the compositor moves the moons without repainting. The back copy is whole and
-@@ -202,9 +330,10 @@ function OrbitingBody({
+@@ -202,9 +294,10 @@ function OrbitingBody({
    radius: number;
  }) {
    const unit = fleetHashUnit(body.key);
@@ -328,16 +292,3 @@ index a27b4010a07d31cc45b41b626a4604173eb27a2c..043f5fc03f43ee96b68403fcbd204747
    const held = !body.running;
  
    return (
-diff --git a/apps/web/src/index.css b/apps/web/src/index.css
-index 961cbd9f2e931a7e83c5ba8c3e7b66a146a35e7c..ff9b9597f6167d062f3791c8d2c4dd7a5c5cd669 100644
---- a/apps/web/src/index.css
-+++ b/apps/web/src/index.css
-@@ -176,6 +176,8 @@ html[data-mobile-composer-route-transition="true"]::view-transition-old(t3-mobil
-   --color-cat-pink: #f5b4a2;
-   --color-cat-peach: #ffd9a8;
-   --color-cat-shade: rgb(40 22 8 / 0.55);
-+  --color-cat-nest: #7a5a3c;
-+  --color-cat-twig: #b8926a;
-   --font-sans:
-     -apple-system, BlinkMacSystemFont, "Inter Variable", "Segoe UI", system-ui, sans-serif;
-   --font-mono:
