@@ -10,7 +10,8 @@ permissions:
 
 jobs:
   mac:
-    runs-on: macos-15
+    # v0.1.12 builds an Apple Speech helper that needs Xcode 26 (the macOS 26 SDK).
+    runs-on: macos-26
     timeout-minutes: 90
     env:
       # Public T3 Connect config for the self-hosted relay.
