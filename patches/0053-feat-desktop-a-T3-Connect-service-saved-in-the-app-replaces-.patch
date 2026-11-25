@@ -1,0 +1,464 @@
+diff --git a/apps/desktop/src/app/DesktopApp.ts b/apps/desktop/src/app/DesktopApp.ts
+index e5d95fbaee295f7597cc3947a73feee65dc564df..b7559edd5bffc7b7b2f06916bd7d6f10dbd25c91 100644
+--- a/apps/desktop/src/app/DesktopApp.ts
++++ b/apps/desktop/src/app/DesktopApp.ts
+@@ -34,6 +34,7 @@ import * as DesktopPreReadyPlatform from "./DesktopPreReadyPlatform.ts";
+ import * as DesktopShutdown from "./DesktopShutdown.ts";
+ import * as DesktopServerExposure from "../backend/DesktopServerExposure.ts";
+ import * as DesktopAppSettings from "../settings/DesktopAppSettings.ts";
++import * as DesktopConnectService from "../settings/DesktopConnectService.ts";
+ import * as DesktopShellEnvironment from "../shell/DesktopShellEnvironment.ts";
+ import * as DesktopStartupRecovery from "./DesktopStartupRecovery.ts";
+ import * as DesktopState from "./DesktopState.ts";
+@@ -213,7 +214,9 @@ const startLocalBackend = Effect.gen(function* () {
+     ...(environment.isDevelopment
+       ? { targetOrigin: Option.getOrThrow(environment.devServerUrl) }
+       : { assetDirectory: environment.clientAssetsDir }),
+-    clerkFrontendApiHostname: DesktopClerk.desktopClerkFrontendApiHostname,
++    clerkFrontendApiHostname:
++      (yield* DesktopConnectService.optional)?.clerkFrontendApiHostname ??
++      DesktopClerk.desktopClerkFrontendApiHostname,
+   });
+   yield* installDesktopIpcHandlers();
+   yield* logBootstrapInfo("bootstrap ipc handlers registered");
+diff --git a/apps/desktop/src/backend/DesktopBackendConfiguration.ts b/apps/desktop/src/backend/DesktopBackendConfiguration.ts
+index 5c9ea2f78c490e80a74af4f91b9b026ab6006e41..867665039ee53902837204720ad1ef3aaada26d8 100644
+--- a/apps/desktop/src/backend/DesktopBackendConfiguration.ts
++++ b/apps/desktop/src/backend/DesktopBackendConfiguration.ts
+@@ -31,6 +31,7 @@ import * as DesktopState from "../app/DesktopState.ts";
+ import * as DesktopServerExposure from "./DesktopServerExposure.ts";
+ import * as DesktopShellEnvironment from "../shell/DesktopShellEnvironment.ts";
+ import * as DesktopAppSettings from "../settings/DesktopAppSettings.ts";
++import * as DesktopConnectService from "../settings/DesktopConnectService.ts";
+ import * as DesktopWslEnvironment from "../wsl/DesktopWslEnvironment.ts";
+ import * as DesktopWslServerTree from "../wsl/DesktopWslServerTree.ts";
+ 
+@@ -786,6 +787,7 @@ export const make = Effect.gen(function* () {
+   const wslEnvironment = yield* DesktopWslEnvironment.DesktopWslEnvironment;
+   const wslServerTree = yield* DesktopWslServerTree.DesktopWslServerTree;
+   const settings = yield* DesktopAppSettings.DesktopAppSettings;
++  const connectService = yield* DesktopConnectService.optional;
+   const desktopState = yield* DesktopState.DesktopState;
+   const mac = yield* Mac.Mac;
+   const random = yield* SecureRandom.SecureRandom;
+@@ -883,6 +885,11 @@ export const make = Effect.gen(function* () {
+     }).pipe(
+       Effect.provideService(DesktopEnvironment.DesktopEnvironment, environment),
+       Effect.provideService(DesktopServerExposure.DesktopServerExposure, serverExposure),
++      // The local server follows a T3 Connect service saved in this app.
++      Effect.map((config) => ({
++        ...config,
++        env: { ...config.env, ...connectService?.backendEnvironment },
++      })),
+     );
+   });
+ 
+diff --git a/apps/desktop/src/ipc/DesktopIpcHandlers.ts b/apps/desktop/src/ipc/DesktopIpcHandlers.ts
+index 9ffc466d5a825183191b2371022b02f97f301e00..6366569760821dd0b38b735055b8c9e1ba3f4626 100644
+--- a/apps/desktop/src/ipc/DesktopIpcHandlers.ts
++++ b/apps/desktop/src/ipc/DesktopIpcHandlers.ts
+@@ -10,6 +10,7 @@ import {
+ import * as DesktopIpc from "./DesktopIpc.ts";
+ import { installNotificationBadge } from "./methods/notificationBadge.ts";
+ import { getClientSettings, setClientSettings } from "./methods/clientSettings.ts";
++import { getConnectService, setConnectService } from "./methods/connectService.ts";
+ import { getConnectionCatalog, setConnectionCatalog } from "./methods/connectionCatalog.ts";
+ import {
+   getHostEnvironmentId,
+@@ -122,6 +123,8 @@ export const installDesktopIpcHandlers = Effect.fn("desktop.ipc.installHandlers"
+   yield* ipc.handle(restartAudioService);
+   yield* ipc.handle(getClientSettings);
+   yield* ipc.handle(setClientSettings);
++  yield* ipc.handleSync(getConnectService);
++  yield* ipc.handle(setConnectService);
+   yield* ipc.handle(getConnectionCatalog);
+   yield* ipc.handle(getSnapShotState);
+   yield* ipc.handle(setupSnapShot);
+diff --git a/apps/desktop/src/ipc/channels.ts b/apps/desktop/src/ipc/channels.ts
+index d590591f595f515bd2f0a655afd4f4342d8f813c..53a59f812232385f6ef563004d6ad782d226f7b0 100644
+--- a/apps/desktop/src/ipc/channels.ts
++++ b/apps/desktop/src/ipc/channels.ts
+@@ -46,6 +46,8 @@ export const SET_LOCAL_ENVIRONMENT_ENABLED_CHANNEL = "desktop:set-local-environm
+ export const GET_HOST_ENVIRONMENT_ID_CHANNEL = "desktop:get-host-environment-id";
+ export const GET_LOCAL_ENVIRONMENT_BEARER_TOKEN_CHANNEL =
+   "desktop:get-local-environment-bearer-token";
++export const GET_CONNECT_SERVICE_CHANNEL = "desktop:get-connect-service";
++export const SET_CONNECT_SERVICE_CHANNEL = "desktop:set-connect-service";
+ export const GET_CLIENT_SETTINGS_CHANNEL = "desktop:get-client-settings";
+ export const SET_CLIENT_SETTINGS_CHANNEL = "desktop:set-client-settings";
+ export const SETUP_SNAP_SHOT_CHANNEL = "desktop:setup-snap-shot";
+diff --git a/apps/desktop/src/ipc/methods/connectService.ts b/apps/desktop/src/ipc/methods/connectService.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..1230acda6009efc3933b455b09d25603b64bfda8
+--- /dev/null
++++ b/apps/desktop/src/ipc/methods/connectService.ts
+@@ -0,0 +1,43 @@
++import { ConnectServiceSettings } from "@t3tools/contracts";
++import { readConnectServiceSettings } from "@t3tools/shared/connectService";
++import * as Effect from "effect/Effect";
++import * as Schema from "effect/Schema";
++
++import * as DesktopLifecycle from "../../app/DesktopLifecycle.ts";
++import * as DesktopConnectService from "../../settings/DesktopConnectService.ts";
++import * as IpcChannels from "../channels.ts";
++import { makeIpcMethod, makeSyncIpcMethod } from "../DesktopIpc.ts";
++
++export class ConnectServiceRejectedError extends Schema.TaggedError<ConnectServiceRejectedError>()(
++  "ConnectServiceRejectedError",
++  {},
++) {
++  override get message(): string {
++    return "The T3 Connect service is not valid and was not saved.";
++  }
++}
++
++export const getConnectService = makeSyncIpcMethod({
++  channel: IpcChannels.GET_CONNECT_SERVICE_CHANNEL,
++  result: Schema.NullOr(ConnectServiceSettings),
++  handler: Effect.fn("desktop.ipc.connectService.get")(function* () {
++    return (yield* DesktopConnectService.optional)?.saved ?? null;
++  }),
++});
++
++// Saving relaunches desktop; null goes back to the service the build ships with.
++export const setConnectService = makeIpcMethod({
++  channel: IpcChannels.SET_CONNECT_SERVICE_CHANNEL,
++  payload: Schema.NullOr(ConnectServiceSettings),
++  result: Schema.Void,
++  handler: Effect.fn("desktop.ipc.connectService.set")(function* (requested) {
++    const connectService = yield* DesktopConnectService.optional;
++    const lifecycle = yield* DesktopLifecycle.DesktopLifecycle;
++    const settings = requested === null ? null : readConnectServiceSettings(requested);
++    if (connectService === undefined || (requested !== null && settings === null)) {
++      return yield* new ConnectServiceRejectedError();
++    }
++    yield* connectService.save(settings);
++    yield* lifecycle.relaunch(`connectService=${settings?.source ?? "built-in"}`);
++  }),
++});
+diff --git a/apps/desktop/src/main.ts b/apps/desktop/src/main.ts
+index 8c32805a94463363b84f93291ad14e4581f0b036..df92a1c9c1eec6bdcf25828cb39ca69d286c993d 100644
+--- a/apps/desktop/src/main.ts
++++ b/apps/desktop/src/main.ts
+@@ -55,6 +55,7 @@ import * as DesktopShutdown from "./app/DesktopShutdown.ts";
+ import * as DesktopObservability from "./app/DesktopObservability.ts";
+ import * as DesktopServerExposure from "./backend/DesktopServerExposure.ts";
+ import * as DesktopClientSettings from "./settings/DesktopClientSettings.ts";
++import * as DesktopConnectService from "./settings/DesktopConnectService.ts";
+ import * as DesktopSavedEnvironments from "./settings/DesktopSavedEnvironments.ts";
+ import * as DesktopSnapShot from "./snapShot/DesktopSnapShot.ts";
+ import * as DesktopAppSettings from "./settings/DesktopAppSettings.ts";
+@@ -152,6 +153,7 @@ const layerDesktopFoundation = Layer.mergeAll(
+   DesktopLegacyLocalStorage.layer,
+   DesktopAppSettings.layer,
+   DesktopClientSettings.layer,
++  DesktopConnectService.layer,
+   DesktopConnectionCatalogStore.layer.pipe(Layer.provideMerge(DesktopSavedEnvironments.layer)),
+   DesktopAssets.layer,
+   DesktopPrimaryPaste.layer,
+diff --git a/apps/desktop/src/preload.ts b/apps/desktop/src/preload.ts
+index ab472baabe623f8da2eb9637e291092b4aceba32..48751ffcc27289df5d48c194d9094dd8896d62f0 100644
+--- a/apps/desktop/src/preload.ts
++++ b/apps/desktop/src/preload.ts
+@@ -163,6 +163,12 @@ contextBridge.exposeInMainWorld("desktopBridge", {
+   setLocalEnvironmentEnabled: (enabled) =>
+     ipcRenderer.invoke(IpcChannels.SET_LOCAL_ENVIRONMENT_ENABLED_CHANNEL, enabled),
+   getHostEnvironmentId: () => ipcRenderer.invoke(IpcChannels.GET_HOST_ENVIRONMENT_ID_CHANNEL),
++  getConnectService: () =>
++    (ipcRenderer.sendSync(IpcChannels.GET_CONNECT_SERVICE_CHANNEL) ?? null) as ReturnType<
++      NonNullable<DesktopBridge["getConnectService"]>
++    >,
++  setConnectService: (settings) =>
++    ipcRenderer.invoke(IpcChannels.SET_CONNECT_SERVICE_CHANNEL, settings),
+   getClientSettings: () => ipcRenderer.invoke(IpcChannels.GET_CLIENT_SETTINGS_CHANNEL),
+   setClientSettings: (settings) =>
+     ipcRenderer.invoke(IpcChannels.SET_CLIENT_SETTINGS_CHANNEL, settings),
+diff --git a/apps/desktop/src/settings/DesktopConnectService.test.ts b/apps/desktop/src/settings/DesktopConnectService.test.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..9f4324480b7e212886863603360effcb23232a22
+--- /dev/null
++++ b/apps/desktop/src/settings/DesktopConnectService.test.ts
+@@ -0,0 +1,117 @@
++import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
++import * as NodeServices from "@effect/platform-node/NodeServices";
++import { assert, describe, it } from "@effect/vitest";
++import type { ConnectServiceSettings } from "@t3tools/contracts";
++import * as Effect from "effect/Effect";
++import * as FileSystem from "effect/FileSystem";
++import * as Layer from "effect/Layer";
++
++import * as DesktopConfig from "../app/DesktopConfig.ts";
++import * as DesktopEnvironment from "../app/DesktopEnvironment.ts";
++import * as DesktopConnectService from "./DesktopConnectService.ts";
++
++const service: ConnectServiceSettings = {
++  relayUrl: "https://relay.example.test",
++  clerkPublishableKey: `pk_live_${btoa("clerk.example.test$")}`,
++  clerkJwtTemplate: "t3-relay",
++  clerkCliOAuthClientId: "cli-client",
++  source: "discovered",
++};
++
++const layerNode = Layer.mergeAll(NodeServices.layer, NodeCrypto.layer);
++
++/** One app launch: the service reads its file while this layer builds. */
++const launch = <A, E>(
++  baseDir: string,
++  use: (
++    connectService: DesktopConnectService.DesktopConnectService["Service"],
++  ) => Effect.Effect<A, E, DesktopEnvironment.DesktopEnvironment | FileSystem.FileSystem>,
++) =>
++  DesktopConnectService.DesktopConnectService.pipe(
++    Effect.flatMap(use),
++    Effect.provide(
++      DesktopConnectService.layer.pipe(
++        Layer.provideMerge(
++          DesktopEnvironment.layer({
++            dirname: "/repo/apps/desktop/src",
++            homeDirectory: baseDir,
++            platform: "darwin",
++            processArch: "x64",
++            appVersion: "1.2.3",
++            appPath: "/repo",
++            isPackaged: true,
++            resourcesPath: "/missing/resources",
++            runningUnderArm64Translation: false,
++          }).pipe(
++            Layer.provide(
++              Layer.mergeAll(layerNode, DesktopConfig.layerTest({ T3CODE_HOME: baseDir })),
++            ),
++          ),
++        ),
++        Layer.provideMerge(layerNode),
++      ),
++    ),
++  );
++
++const withHome = <A, E>(effect: (baseDir: string) => Effect.Effect<A, E, FileSystem.FileSystem>) =>
++  Effect.gen(function* () {
++    const fileSystem = yield* FileSystem.FileSystem;
++    return yield* effect(
++      yield* fileSystem.makeTempDirectoryScoped({ prefix: "t3-desktop-connect-service-test-" }),
++    );
++  }).pipe(Effect.provide(layerNode));
++
++describe("DesktopConnectService", () => {
++  it.effect("applies a saved service on the next launch and drops it on reset", () =>
++    withHome((baseDir) =>
++      Effect.gen(function* () {
++        const first = yield* launch(baseDir, (connectService) =>
++          connectService.save(service).pipe(Effect.as(connectService)),
++        );
++        // The launch that saved keeps running on what it started with.
++        assert.strictEqual(first.saved, null);
++        assert.deepStrictEqual(first.backendEnvironment, {});
++
++        const second = yield* launch(baseDir, (connectService) =>
++          connectService.save(null).pipe(Effect.as(connectService)),
++        );
++        assert.deepStrictEqual(second.saved, service);
++        assert.strictEqual(second.clerkFrontendApiHostname, "clerk.example.test");
++        assert.deepStrictEqual(second.backendEnvironment, {
++          T3CODE_RELAY_URL: "https://relay.example.test",
++          T3CODE_CLERK_PUBLISHABLE_KEY: service.clerkPublishableKey,
++          T3CODE_CLERK_JWT_TEMPLATE: "t3-relay",
++          T3CODE_CLERK_CLI_OAUTH_CLIENT_ID: "cli-client",
++        });
++
++        const third = yield* launch(baseDir, Effect.succeed);
++        assert.strictEqual(third.saved, null);
++        assert.strictEqual(third.clerkFrontendApiHostname, undefined);
++      }),
++    ),
++  );
++
++  it.effect("starts on the built-in service when the saved file is unusable", () =>
++    withHome((baseDir) =>
++      Effect.gen(function* () {
++        const fileSystem = yield* FileSystem.FileSystem;
++        const path = yield* launch(baseDir, () =>
++          Effect.map(DesktopEnvironment.DesktopEnvironment, (environment) =>
++            environment.path.join(environment.stateDir, "connect-service.json"),
++          ),
++        );
++        yield* fileSystem.makeDirectory(path.replace(/[^/\\]+$/u, ""), { recursive: true });
++        for (const contents of [
++          "{ not json",
++          JSON.stringify({ ...service, relayUrl: "http://relay.example.test" }),
++          JSON.stringify({ ...service, clerkPublishableKey: "sk_live_secret" }),
++        ]) {
++          yield* fileSystem.writeFileString(path, contents);
++          const launched = yield* launch(baseDir, Effect.succeed);
++          assert.strictEqual(launched.saved, null);
++          assert.deepStrictEqual(launched.backendEnvironment, {});
++        }
++      }),
++    ),
++  );
++});
+diff --git a/apps/desktop/src/settings/DesktopConnectService.ts b/apps/desktop/src/settings/DesktopConnectService.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..2f6f340c1c229a7adbecf208900b1ffe378ea7ca
+--- /dev/null
++++ b/apps/desktop/src/settings/DesktopConnectService.ts
+@@ -0,0 +1,107 @@
++import { ConnectServiceSettings } from "@t3tools/contracts";
++import {
++  connectServiceEnvironment,
++  parseConnectServiceSettings,
++  readConnectServiceSettings,
++} from "@t3tools/shared/connectService";
++import { clerkFrontendApiHostnameFromPublishableKey } from "@t3tools/shared/relayAuth";
++import * as Context from "effect/Context";
++import * as Effect from "effect/Effect";
++import * as FileSystem from "effect/FileSystem";
++import * as Layer from "effect/Layer";
++import * as Option from "effect/Option";
++import * as Schema from "effect/Schema";
++
++import * as DesktopEnvironment from "../app/DesktopEnvironment.ts";
++
++export class DesktopConnectServiceWriteError extends Schema.TaggedError<DesktopConnectServiceWriteError>()(
++  "DesktopConnectServiceWriteError",
++  {
++    path: Schema.String,
++    cause: Schema.Defect(),
++  },
++) {
++  override get message(): string {
++    return `Could not save the T3 Connect service at ${this.path}.`;
++  }
++}
++
++/**
++ * The T3 Connect service this device saved in place of the build's. Read once at startup: the
++ * window's security policy, the sign-in library and the local server all take it at launch,
++ * so a change applies by relaunching.
++ */
++export class DesktopConnectService extends Context.Service<
++  DesktopConnectService,
++  {
++    readonly saved: ConnectServiceSettings | null;
++    /** Undefined when nothing is saved, so callers fall back to the build's hostname. */
++    readonly clerkFrontendApiHostname: string | undefined;
++    readonly backendEnvironment: Readonly<Record<string, string>>;
++    readonly save: (
++      settings: ConnectServiceSettings | null,
++    ) => Effect.Effect<void, DesktopConnectServiceWriteError>;
++  }
++>()("@t3tools/desktop/settings/DesktopConnectService") {}
++
++const encodeSettingsJson = Schema.encodeEffect(Schema.fromJsonString(ConnectServiceSettings));
++
++const hostnameOf = (saved: ConnectServiceSettings | null): string | undefined => {
++  if (saved === null) return undefined;
++  try {
++    return clerkFrontendApiHostnameFromPublishableKey(saved.clerkPublishableKey);
++  } catch {
++    return undefined;
++  }
++};
++
++const of = (saved: ConnectServiceSettings | null, save: DesktopConnectService["Service"]["save"]) =>
++  DesktopConnectService.of({
++    saved,
++    clerkFrontendApiHostname: hostnameOf(saved),
++    backendEnvironment: connectServiceEnvironment(saved),
++    save,
++  });
++
++const make = Effect.gen(function* () {
++  const environment = yield* DesktopEnvironment.DesktopEnvironment;
++  const fileSystem = yield* FileSystem.FileSystem;
++  const settingsPath = environment.path.join(environment.stateDir, "connect-service.json");
++
++  // An unreadable or invalid file means "nothing saved", so a bad value can never block startup.
++  const saved = yield* fileSystem.readFileString(settingsPath).pipe(
++    Effect.map((raw) => readConnectServiceSettings(parseConnectServiceSettings(raw))),
++    Effect.orElseSucceed(() => null),
++  );
++
++  return of(
++    saved,
++    Effect.fn("desktop.connectService.save")(function* (settings) {
++      const tempPath = `${settingsPath}.${process.pid}.tmp`;
++      const write =
++        settings === null
++          ? fileSystem.remove(settingsPath, { force: true })
++          : encodeSettingsJson(settings).pipe(
++              Effect.tap(() => fileSystem.makeDirectory(environment.stateDir, { recursive: true })),
++              Effect.flatMap((json) => fileSystem.writeFileString(tempPath, `${json}\n`)),
++              Effect.andThen(fileSystem.rename(tempPath, settingsPath)),
++              Effect.ensuring(fileSystem.remove(tempPath, { force: true }).pipe(Effect.ignore)),
++            );
++      yield* write.pipe(
++        Effect.mapError(
++          (cause) => new DesktopConnectServiceWriteError({ path: settingsPath, cause }),
++        ),
++      );
++    }),
++  );
++});
++
++export const layer = Layer.effect(DesktopConnectService, make);
++
++/**
++ * For code whose own tests build no settings layers. The app provides this service in the same
++ * layer as its other settings, so it is missing only in those tests, where nothing is saved.
++ */
++export const optional = Effect.serviceOption(DesktopConnectService).pipe(
++  Effect.map(Option.getOrUndefined),
++);
+diff --git a/apps/desktop/src/window/DesktopWindow.ts b/apps/desktop/src/window/DesktopWindow.ts
+index 2b2401f42d57aa393fbc1ca04ba1140c3afacdea..e0a9e3d1303ef8a3f167296f724deeb63342fc70 100644
+--- a/apps/desktop/src/window/DesktopWindow.ts
++++ b/apps/desktop/src/window/DesktopWindow.ts
+@@ -45,6 +45,7 @@ import * as PreviewManager from "../preview/Manager.ts";
+ import * as PreviewPasskeys from "../preview/Passkeys.ts";
+ import * as DesktopAppSettings from "../settings/DesktopAppSettings.ts";
+ import * as DesktopClientSettings from "../settings/DesktopClientSettings.ts";
++import * as DesktopConnectService from "../settings/DesktopConnectService.ts";
+ import * as ElectronApp from "../electron/ElectronApp.ts";
+ import { m } from "../i18n/messages.ts";
+ import * as DesktopRendererHistory from "../telemetry/DesktopRendererHistory.ts";
+@@ -406,6 +407,7 @@ export const make = Effect.gen(function* () {
+   const primaryPaste = yield* DesktopPrimaryPaste.DesktopPrimaryPaste;
+   const desktopSettings = yield* DesktopAppSettings.DesktopAppSettings;
+   const clientSettings = yield* DesktopClientSettings.DesktopClientSettings;
++  const connectService = yield* DesktopConnectService.optional;
+   const electronApp = yield* ElectronApp.ElectronApp;
+   const rendererHistory = yield* DesktopRendererHistory.DesktopRendererHistory;
+   const backendReadyRef = yield* Ref.make(false);
+@@ -1063,7 +1065,8 @@ export const make = Effect.gen(function* () {
+       {
+         desktopOrigin: getDesktopOrigin(environment.isDevelopment),
+         mainWebContentsId: window.webContents.id,
+-        clerkFrontendApiHostname: DesktopClerk.desktopClerkFrontendApiHostname,
++        clerkFrontendApiHostname:
++          connectService?.clerkFrontendApiHostname ?? DesktopClerk.desktopClerkFrontendApiHostname,
+         devServerOrigin: Option.getOrUndefined(
+           Option.map(environment.devServerUrl, (url) => url.origin),
+         ),
+diff --git a/packages/contracts/src/ipc.ts b/packages/contracts/src/ipc.ts
+index adbb28bbf1202a85f950536b90e3a99f5fcb9846..64d121ef6df30e1ab027c6371f9dc68dec539d08 100644
+--- a/packages/contracts/src/ipc.ts
++++ b/packages/contracts/src/ipc.ts
+@@ -14,6 +14,7 @@ import { AuthAccessTokenResult, AuthSessionState } from "./auth.ts";
+ import { AdvertisedEndpoint } from "./remoteAccess.ts";
+ import { ExecutionEnvironmentDescriptor } from "./environment.ts";
+ import { type ClientSettings, type QuitConfirmationMode, SnapShotShortcut } from "./settings.ts";
++import type { ConnectServiceSettings } from "./connectService.ts";
+ import type { EditorId } from "./editor.ts";
+ import { KeybindingShortcut, type PreviewForwardedShortcut } from "./keybindings.ts";
+ 
+@@ -1143,6 +1144,10 @@ export interface DesktopBridge {
+   /** The environment ID recorded in this app's T3 home, such as its own machine's background service. */
+   getHostEnvironmentId?: () => Promise<string | null>;
+   getLocalEnvironmentBearerToken: () => Promise<string>;
++  /** The T3 Connect service saved on this device, as read when the app started. */
++  getConnectService?: () => ConnectServiceSettings | null;
++  /** Saves it and relaunches the app; `null` returns to the service the build ships with. */
++  setConnectService?: (settings: ConnectServiceSettings | null) => Promise<void>;
+   getClientSettings: () => Promise<ClientSettings | null>;
+   setClientSettings: (settings: ClientSettings) => Promise<void>;
+   getConnectionCatalog: () => Promise<string | null>;

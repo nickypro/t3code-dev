@@ -1,24 +1,5 @@
-From 41452300d65f182777e4b9ab78e580fda035d27e Mon Sep 17 00:00:00 2001
-From: Nicky Pochinkov <work@nicky.pro>
-Date: Thu, 5 Nov 2026 12:39:50 +0000
-Subject: [PATCH] feat(server): offer a TLS client certificate on outbound
- fetch
-
-Machines behind a client-certificate gate (self-hosted T3 Connect via
-t3gate) refuse peer links from servers that can't present one, so the
-desktop's built-in server couldn't link to them. If
-<T3 home>/client-cert/client.{crt,key} (or T3CODE_TLS_CLIENT_CERT/KEY)
-exist, install an HTTP/1.1 undici Agent that offers it.
-
-Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
----
- apps/server/src/binCli.ts            |  7 ++-
- apps/server/src/outboundHttp.test.ts | 68 ++++++++++++++++++++++++++++
- apps/server/src/outboundHttp.ts      | 49 ++++++++++++++++++++
- 3 files changed, 123 insertions(+), 1 deletion(-)
-
 diff --git a/apps/server/src/binCli.ts b/apps/server/src/binCli.ts
-index 995b207e7c..7d166caa62 100644
+index 2ae78f272cd6be1f9a84fb4da7f147c00e4d9f1f..ec07f6dc0c3f985510a11c4f06b6817056a353f3 100644
 --- a/apps/server/src/binCli.ts
 +++ b/apps/server/src/binCli.ts
 @@ -17,7 +17,11 @@ import { appCommand } from "./cli/app.ts";
@@ -33,8 +14,8 @@ index 995b207e7c..7d166caa62 100644
 +} from "./outboundHttp.ts";
  import { sharedServerCommandFlags } from "./cli/config.ts";
  import { projectCommand } from "./cli/project.ts";
- import { threadCommand } from "./cli/thread.ts";
-@@ -122,6 +126,7 @@ export const cli = makeCli();
+ import { feedbackCommand } from "./cli/feedback.ts";
+@@ -126,6 +130,7 @@ export const cli = makeCli();
  export function runCli() {
    extendConnectionAttemptTimeout();
    keepOutboundFetchOnHttp1();
@@ -43,7 +24,7 @@ index 995b207e7c..7d166caa62 100644
      args: process.argv.slice(2),
      // A child started over IPC (a service launcher) has no one to answer.
 diff --git a/apps/server/src/outboundHttp.test.ts b/apps/server/src/outboundHttp.test.ts
-index ed3b09abaa..a82b8c906a 100644
+index ed3b09abaa5e649e07cfe97b540f347a8e174837..a82b8c906a261bcb8cf4ae1a39e243a6ac6fbf65 100644
 --- a/apps/server/src/outboundHttp.test.ts
 +++ b/apps/server/src/outboundHttp.test.ts
 @@ -1,6 +1,10 @@
@@ -157,7 +138,7 @@ index ed3b09abaa..a82b8c906a 100644
    const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
    const child = yield* spawner.spawn(ChildProcess.make(process.execPath, args));
 diff --git a/apps/server/src/outboundHttp.ts b/apps/server/src/outboundHttp.ts
-index ead14cb5d2..a42f609acf 100644
+index ead14cb5d203599327a2d6d35aea03c5f532bbc2..a42f609acfe3177d0c61032ff8ddbc1841d55ae3 100644
 --- a/apps/server/src/outboundHttp.ts
 +++ b/apps/server/src/outboundHttp.ts
 @@ -1,5 +1,10 @@
@@ -222,6 +203,3 @@ index ead14cb5d2..a42f609acf 100644
  // @types/node does not declare setTypeOfService yet.
  type TypeOfServiceSocket = {
    setTypeOfService?: (this: NodeNet.Socket, typeOfService: number) => NodeNet.Socket;
--- 
-2.50.1 (Apple Git-155)
-

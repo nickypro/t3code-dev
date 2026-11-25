@@ -1,0 +1,48 @@
+diff --git a/apps/mobile/src/components/BrandMark.tsx b/apps/mobile/src/components/BrandMark.tsx
+index 848566768a56dadfeb842379db3dd5a31f3589af..d009482ca950f0155787b36c798004b6d7053220 100644
+--- a/apps/mobile/src/components/BrandMark.tsx
++++ b/apps/mobile/src/components/BrandMark.tsx
+@@ -37,9 +37,7 @@ export function BrandMark(props: { readonly compact?: boolean; readonly stageLab
+       />
+       <View className="gap-1">
+         <View className="flex-row items-center gap-2">
+-          <Text className="text-lg font-t3-bold tracking-[-0.4px] text-foreground">
+-            Catgirl Code
+-          </Text>
++          <Text className="text-lg font-t3-bold tracking-[-0.4px] text-foreground">T3 Code</Text>
+           <View className="rounded-full bg-subtle px-2 py-1">
+             <Text className="text-3xs font-t3-bold tracking-[1.1px] uppercase text-foreground-muted">
+               {stageLabel}
+diff --git a/apps/mobile/src/components/CompactBrandTitle.tsx b/apps/mobile/src/components/CompactBrandTitle.tsx
+index 4c2f86a9077864da3615f00f6a0e9b6acd007ed0..d5a97d6d404e6c7185db5c5db6fbe94e0ff0ac1b 100644
+--- a/apps/mobile/src/components/CompactBrandTitle.tsx
++++ b/apps/mobile/src/components/CompactBrandTitle.tsx
+@@ -11,6 +11,7 @@ import { resolveMobileStageLabel } from "../lib/mobileBranding";
+ import { useAndroidControlSizing } from "./ui/useAndroidControlSizing";
+ 
+ const BRAND_MAX_FONT_SCALE = 1.4;
++const WORDMARK_PREFIX = "Cat";
+ const WORDMARK_SUFFIX = "Code";
+ 
+ export function brandTitleOffset(): number {
+@@ -60,7 +61,7 @@ export function CompactBrandTitle(
+         className="font-t3-bold text-foreground"
+         style={{ fontSize: 21 * scale, letterSpacing: -0.5 * scale }}
+       >
+-        Cat
++        {WORDMARK_PREFIX}
+       </Text>
+       <Text
+         allowFontScaling={props.allowFontScaling}
+diff --git a/apps/mobile/src/components/T3Wordmark.tsx b/apps/mobile/src/components/T3Wordmark.tsx
+index b0e380d362d40ac7e31702824ab546062f8a8a6a..7a2128c894a1b0bd0adeffd4c87ce1738ad43898 100644
+--- a/apps/mobile/src/components/T3Wordmark.tsx
++++ b/apps/mobile/src/components/T3Wordmark.tsx
+@@ -13,6 +13,7 @@ export function T3Wordmark(props: {
+   const aspectRatio = 286 / 310;
+   return (
+     <Svg
++      // oxlint-disable-next-line t3code/no-untranslated-copy -- product wordmark
+       accessibilityLabel="Catgirl"
+       height={props.height}
+       width={props.height * aspectRatio}

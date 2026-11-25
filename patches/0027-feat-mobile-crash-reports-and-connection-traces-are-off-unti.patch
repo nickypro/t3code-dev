@@ -1,0 +1,72 @@
+diff --git a/apps/mobile/src/features/diagnostics/SettingsDiagnosticsRouteScreen.tsx b/apps/mobile/src/features/diagnostics/SettingsDiagnosticsRouteScreen.tsx
+index f25f036963e59e153ee04ae91af9d9d0d7f05e40..abcb5196a25490f3354cc622315f356bde1313ef 100644
+--- a/apps/mobile/src/features/diagnostics/SettingsDiagnosticsRouteScreen.tsx
++++ b/apps/mobile/src/features/diagnostics/SettingsDiagnosticsRouteScreen.tsx
+@@ -167,8 +167,8 @@ function CrashReportsSetting() {
+   const gt = useGT();
+   const ready = AsyncResult.isSuccess(preferences) && !preferences.waiting;
+   const enabled = AsyncResult.isSuccess(preferences)
+-    ? preferences.value.crashReportsEnabled !== false
+-    : true;
++    ? preferences.value.crashReportsEnabled === true
++    : false;
+ 
+   const change = (value: boolean) => {
+     setSaving(true);
+diff --git a/apps/mobile/src/features/observability/ConnectionTracesSwitch.tsx b/apps/mobile/src/features/observability/ConnectionTracesSwitch.tsx
+index c5b5b6d2a758dcf861c8d55d076080c4f9e4f92f..65ce55d27634c69047ee753ba2d17e34079b8992 100644
+--- a/apps/mobile/src/features/observability/ConnectionTracesSwitch.tsx
++++ b/apps/mobile/src/features/observability/ConnectionTracesSwitch.tsx
+@@ -41,8 +41,8 @@ export function ConnectionTracesSwitch() {
+   const gt = useGT();
+   const ready = AsyncResult.isSuccess(preferences) && !preferences.waiting;
+   const enabled = AsyncResult.isSuccess(preferences)
+-    ? preferences.value.connectionTracesEnabled !== false
+-    : true;
++    ? preferences.value.connectionTracesEnabled === true
++    : false;
+ 
+   const change = (value: boolean) => {
+     setSaving(true);
+diff --git a/apps/mobile/src/features/observability/diagnosticsSetting.ts b/apps/mobile/src/features/observability/diagnosticsSetting.ts
+index 175a45a0e8051e95e8e5404e05968b974fdc5c54..bb1bcce4a4f860bca9e439222e8bb6466cb7e651 100644
+--- a/apps/mobile/src/features/observability/diagnosticsSetting.ts
++++ b/apps/mobile/src/features/observability/diagnosticsSetting.ts
+@@ -12,7 +12,7 @@ export function setConnectionTracesEnabled(enabled: boolean): void {
+ void import("../../persistence/imperative")
+   .then(({ loadPreferences }) => loadPreferences())
+   .then((preferences) => {
+-    if (!changedSinceLoad) sending = preferences.connectionTracesEnabled !== false;
++    if (!changedSinceLoad) sending = preferences.connectionTracesEnabled === true;
+   })
+   .catch((error: unknown) => {
+     console.warn("[tracing] could not read the connection traces setting", error);
+diff --git a/apps/mobile/src/features/observability/observe.ts b/apps/mobile/src/features/observability/observe.ts
+index fbbb5e22b8339b166b5e4c078fbe8dfcb781f0e3..a24549771bf8233e8e077ac0fbba0d63eb21bb14 100644
+--- a/apps/mobile/src/features/observability/observe.ts
++++ b/apps/mobile/src/features/observability/observe.ts
+@@ -53,7 +53,7 @@ if (!crashReportingAvailable) {
+       (preferences) =>
+         changedSinceLoad()
+           ? undefined
+-          : setCrashReportsEnabled(preferences.crashReportsEnabled !== false),
++          : setCrashReportsEnabled(preferences.crashReportsEnabled === true),
+       // Observe keeps the last choice it was given, which stands in for the unreadable one.
+       (error: unknown) => console.warn("[observe] could not read the crash report setting", error),
+     )
+diff --git a/apps/mobile/src/persistence/mobile-preferences.ts b/apps/mobile/src/persistence/mobile-preferences.ts
+index 98ee4cf34499e22d6c22b13b36192df465778dfb..30546927ab04f81eea66f67ed3edb3ac5f781697 100644
+--- a/apps/mobile/src/persistence/mobile-preferences.ts
++++ b/apps/mobile/src/persistence/mobile-preferences.ts
+@@ -154,9 +154,9 @@ export interface Preferences {
+   readonly codeFontSize?: number | null;
+   readonly codeWordBreak?: boolean;
+   readonly mathRenderingEnabled?: boolean;
+-  /** Unset means on: crash reports are sent unless the user turns them off. */
++  /** Unset means off: Catgirl Code sends crash reports only once the user turns them on. */
+   readonly crashReportsEnabled?: boolean;
+-  /** Unset means on: connection traces are sent unless the user turns them off. */
++  /** Unset means off: Catgirl Code sends connection traces only once the user turns them on. */
+   readonly connectionTracesEnabled?: boolean;
+   readonly connectOnboardingOptOutAccounts?: ReadonlyArray<string>;
+   readonly collapsedProjectGroups?: readonly string[];

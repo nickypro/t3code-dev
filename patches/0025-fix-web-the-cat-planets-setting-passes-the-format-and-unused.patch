@@ -1,0 +1,34 @@
+diff --git a/apps/web/src/components/settings/CatFleetSettingsRow.tsx b/apps/web/src/components/settings/CatFleetSettingsRow.tsx
+index 9bd2f9eabf7cacdb22efc50e01bcec6b3ef85fd6..f1bd76be70f691ac68f93a51614f9e6ac67cbb27 100644
+--- a/apps/web/src/components/settings/CatFleetSettingsRow.tsx
++++ b/apps/web/src/components/settings/CatFleetSettingsRow.tsx
+@@ -17,7 +17,8 @@ const LIMITS: readonly SidebarCatFleetLimit[] = [4, 8, 12, 16, MAX_SIDEBAR_CAT_F
+ export function CatFleetSettingsRow() {
+   const enabled = useClientSettings((s) => s.sidebarCatFleetEnabled);
+   const limit = useClientSettings((s) => s.sidebarCatFleetLimit);
+-  const label = (value: number) => (value >= MAX_SIDEBAR_CAT_FLEET_LIMIT ? "All" : `Up to ${value}`);
++  const label = (value: number) =>
++    value >= MAX_SIDEBAR_CAT_FLEET_LIMIT ? "All" : `Up to ${value}`;
+   const isDefault =
+     enabled === DEFAULT_CLIENT_SETTINGS.sidebarCatFleetEnabled &&
+     limit === DEFAULT_CLIENT_SETTINGS.sidebarCatFleetLimit;
+diff --git a/packages/contracts/src/settings.ts b/packages/contracts/src/settings.ts
+index 76a350604cab7c0709862c81765096f133496b3e..ac42d5950d8f4388f31eb56e82a15cfc23c96bba 100644
+--- a/packages/contracts/src/settings.ts
++++ b/packages/contracts/src/settings.ts
+@@ -173,13 +173,13 @@ export const InterfaceFontSize = Schema.Int.check(
+ export type InterfaceFontSize = typeof InterfaceFontSize.Type;
+ export const DEFAULT_INTERFACE_FONT_SIZE: InterfaceFontSize = 16;
+ 
+-export const MIN_SIDEBAR_CAT_FLEET_LIMIT = 1;
++const MIN_SIDEBAR_CAT_FLEET_LIMIT = 1;
+ export const MAX_SIDEBAR_CAT_FLEET_LIMIT = 48;
+ export const SidebarCatFleetLimit = Schema.Int.check(
+   Schema.isBetween({ minimum: MIN_SIDEBAR_CAT_FLEET_LIMIT, maximum: MAX_SIDEBAR_CAT_FLEET_LIMIT }),
+ );
+ export type SidebarCatFleetLimit = typeof SidebarCatFleetLimit.Type;
+-export const DEFAULT_SIDEBAR_CAT_FLEET_LIMIT: SidebarCatFleetLimit = 8;
++const DEFAULT_SIDEBAR_CAT_FLEET_LIMIT: SidebarCatFleetLimit = 8;
+ 
+ export const MIN_PROMPT_FONT_SIZE = 12;
+ export const MAX_PROMPT_FONT_SIZE = 20;

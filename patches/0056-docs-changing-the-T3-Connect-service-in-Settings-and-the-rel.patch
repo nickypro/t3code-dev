@@ -1,0 +1,35 @@
+diff --git a/docs/operations/02_connect-setup.md b/docs/operations/02_connect-setup.md
+index 9fe6fd1a4ffde213d19542f541743e1ce2b29064..740bbcdc348f45ddd690c743d05f95e501a796bf 100644
+--- a/docs/operations/02_connect-setup.md
++++ b/docs/operations/02_connect-setup.md
+@@ -15,6 +15,30 @@ T3CODE_RELAY_URL=https://relay.example.com
+ 
+ `CLERK_SECRET_KEY` belongs only in relay secrets, never in client config. Client and bundled-server builds embed these values at build time; EAS preview/production environments need the publishable key, JWT template, and relay URL.
+ 
++### Changing the service without a rebuild
++
++The built-in values are a default. Each app can save its own service under **Settings > Connections > T3 Connect service** (mobile: **Settings > T3 Connect service**), which replaces all four values on that device until it is reset. The app reads the saved service once at startup, so saving signs out of the old service and restarts the app; a saved value the app cannot read is ignored, never an error. The desktop app also hands its saved service to its local server through the `T3CODE_*` variables above. A standalone server needs none of them when it is linked from an app, which gives it the relay address; only `t3 connect` on the machine itself reads them, from the environment or the build.
++
++Saving takes one address. The app checks that `/.well-known/oauth-authorization-server` there names the same address as its `issuer`, then reads the sign-in values from the relay:
++
++```http
++GET /.well-known/t3-connect.json
++```
++
++```json
++{
++  "version": 1,
++  "relayUrl": "https://relay.example.com",
++  "clerk": {
++    "publishableKey": "pk_live_...",
++    "jwtTemplate": "t3-relay",
++    "cliOAuthClientId": "..."
++  }
++}
++```
++
++`relayUrl` must equal the address the document was fetched from, and `cliOAuthClientId` may be absent. New optional fields keep `version` at 1; a change an older app cannot read raises it, and that app then asks for the values by hand, as it does on a 404. The relay serves the document once it is deployed with `CLERK_JWT_TEMPLATE` (and optionally `CLERK_CLI_OAUTH_CLIENT_ID`); see [`infra/relay/.env.example`](../../infra/relay/.env.example). Everything in it is a public identifier.
++
+ ## Clerk setup
+ 
+ ### CLI OAuth application

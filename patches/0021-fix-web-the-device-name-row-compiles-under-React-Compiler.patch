@@ -1,0 +1,15 @@
+diff --git a/apps/web/src/components/settings/DeviceNameRow.tsx b/apps/web/src/components/settings/DeviceNameRow.tsx
+index d3fe42b7597fb205721b95ff7a35a534f2448718..d2654dcf52f66e58cee0611376597d2de0f4a882 100644
+--- a/apps/web/src/components/settings/DeviceNameRow.tsx
++++ b/apps/web/src/components/settings/DeviceNameRow.tsx
+@@ -33,7 +33,9 @@ export function DeviceNameRow({ environmentId }: { readonly environmentId: Envir
+           spellCheck={false}
+           value={saved}
+           onCommit={(next) => {
+-            const { [environmentId]: _previous, ...others } = overrides;
++            const others = Object.fromEntries(
++              Object.entries(overrides).filter(([id]) => id !== environmentId),
++            );
+             const name = next.trim();
+             void updateClientSettings({
+               environmentLabelOverrides:

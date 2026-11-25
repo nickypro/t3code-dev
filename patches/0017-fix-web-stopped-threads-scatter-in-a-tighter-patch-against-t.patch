@@ -1,0 +1,27 @@
+diff --git a/apps/web/src/components/sidebar/SidebarCatFleet.tsx b/apps/web/src/components/sidebar/SidebarCatFleet.tsx
+index e9d66745424d8618751d6b3c46966aacc0db6506..5b40adc225baa12e614f89ce8e00fc0f92bee37b 100644
+--- a/apps/web/src/components/sidebar/SidebarCatFleet.tsx
++++ b/apps/web/src/components/sidebar/SidebarCatFleet.tsx
+@@ -26,8 +26,8 @@ const SUBAGENT = { size: 2.2, radius: 4.8, period: 3.2, max: 3 };
+ const MOON_COLORS = ["var(--color-cat-pink)", "var(--color-cat-cream)", "var(--color-cat-peach)"];
+ const MAX_BODIES = 14;
+ // Stopped threads lie scattered just under the cat: across this arc of its outline, and from
+-// touching it to this far off.
+-const SCATTER = { size: 3.6, arc: 150, drift: 3.8 };
++// just overlapping it to this far off.
++const SCATTER = { size: 3.4, arc: 112, drift: 2.4, overlap: 0.5 };
+ // A cat with work running glows, fully once this many threads and sub-agents run on it.
+ const GLOW = { radius: 21, full: 5 };
+ const MAX_STOPPED = 16;
+@@ -219,7 +219,10 @@ function StoppedDot({ body, index, total }: { body: CatFleetBody; index: number;
+   const along = (index + 0.5 - total / 2 + (fleetHashUnit(body.key) - 0.5) * 0.9) * share;
+   const angle = ((90 + along) * Math.PI) / 180;
+   const distance =
+-    HEAD.radius + SCATTER.size / 2 + fleetHashUnit(`${body.key}:drift`) * SCATTER.drift;
++    HEAD.radius +
++    SCATTER.size / 2 -
++    SCATTER.overlap +
++    fleetHashUnit(`${body.key}:drift`) * SCATTER.drift;
+   return (
+     <span
+       className="pointer-events-none absolute z-[1] rounded-full border border-current opacity-60"

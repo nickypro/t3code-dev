@@ -1,0 +1,44 @@
+diff --git a/apps/mobile/src/features/cloud/CloudAuthProvider.tsx b/apps/mobile/src/features/cloud/CloudAuthProvider.tsx
+index df20ef805cd1d58f12b6fc78d6181d87001161f3..8f76e70744f762aa9daaeb8876bc7c2c02da3084 100644
+--- a/apps/mobile/src/features/cloud/CloudAuthProvider.tsx
++++ b/apps/mobile/src/features/cloud/CloudAuthProvider.tsx
+@@ -25,7 +25,7 @@ export function CloudAuthProvider(props: { readonly children: ReactNode }) {
+   }
+ 
+   return (
+-    <ClerkProvider publishableKey={publishableKey} tokenCache={tokenCache}>
++    <ClerkProvider publishableKey={publishableKey} tokenCache={tokenCache} telemetry={false}>
+       {props.children}
+     </ClerkProvider>
+   );
+diff --git a/apps/web/src/components/clerk/BrowserManagedAuthShell.tsx b/apps/web/src/components/clerk/BrowserManagedAuthShell.tsx
+index 843329421873cff3339acdf0aebfa8e56a2ca64f..2268919d51b4d466f56c0cf876cfffcae2088cf1 100644
+--- a/apps/web/src/components/clerk/BrowserManagedAuthShell.tsx
++++ b/apps/web/src/components/clerk/BrowserManagedAuthShell.tsx
+@@ -13,7 +13,7 @@ export default function BrowserManagedAuthShell({
+   readonly children: ReactNode;
+ }) {
+   return (
+-    <ClerkProvider appearance={clerkAppearance} publishableKey={publishableKey}>
++    <ClerkProvider appearance={clerkAppearance} publishableKey={publishableKey} telemetry={false}>
+       <ManagedRelayAuthProvider>{children}</ManagedRelayAuthProvider>
+     </ClerkProvider>
+   );
+diff --git a/apps/web/src/components/clerk/ElectronManagedAuthShell.tsx b/apps/web/src/components/clerk/ElectronManagedAuthShell.tsx
+index 8ed4de1ffba10f19b530e29cbfd23a6fe6badf85..6a722cb16e84929473256803f40eb58967140c04 100644
+--- a/apps/web/src/components/clerk/ElectronManagedAuthShell.tsx
++++ b/apps/web/src/components/clerk/ElectronManagedAuthShell.tsx
+@@ -15,7 +15,12 @@ export default function ElectronManagedAuthShell({
+   readonly children: ReactNode;
+ }) {
+   return (
+-    <ClerkProvider appearance={clerkAppearance} publishableKey={publishableKey} passkeys={passkeys}>
++    <ClerkProvider
++      appearance={clerkAppearance}
++      publishableKey={publishableKey}
++      passkeys={passkeys}
++      telemetry={false}
++    >
+       <ManagedRelayAuthProvider>{children}</ManagedRelayAuthProvider>
+     </ClerkProvider>
+   );

@@ -1,0 +1,16 @@
+diff --git a/apps/mobile/src/connection/ssh/gateway.test.ts b/apps/mobile/src/connection/ssh/gateway.test.ts
+index a0ee034cefd62759c09d65ac9d6c9c562e6f7934..1ff035305e4b771b7f025ad7047e188dff09fae3 100644
+--- a/apps/mobile/src/connection/ssh/gateway.test.ts
++++ b/apps/mobile/src/connection/ssh/gateway.test.ts
+@@ -89,7 +89,10 @@ function setup(options: { readonly connect?: () => SshConnectResult } = {}) {
+     // Only the reuse probe goes through the client; the auth helpers are mocked above.
+     httpClient: HttpClient.make((request) =>
+       Effect.sync(() =>
+-        HttpClientResponse.fromWeb(request, new Response("", { status: forward.answers ? 200 : 503 })),
++        HttpClientResponse.fromWeb(
++          request,
++          new Response("", { status: forward.answers ? 200 : 503 }),
++        ),
+       ),
+     ),
+     clientMetadata: { label: "Phone", os: "Android" },

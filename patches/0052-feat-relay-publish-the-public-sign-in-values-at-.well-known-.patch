@@ -1,0 +1,191 @@
+diff --git a/infra/relay/.env.example b/infra/relay/.env.example
+index 805c5057cbd61d85f09d053be47bf7dea614e02d..3b49032c2e1d72cb061cd7b21a6b3c357e31ee4c 100644
+--- a/infra/relay/.env.example
++++ b/infra/relay/.env.example
+@@ -32,6 +32,11 @@ RELAY_TUNNEL_ZONE_NAME=tunnels.example.com
+ CLERK_PUBLISHABLE_KEY=pk_test_...
+ CLERK_SECRET_KEY=sk_test_...
+ CLERK_JWT_AUDIENCE=t3-code-relay
++# Optional: publish the public sign-in values at /.well-known/t3-connect.json so an
++# app needs only this relay's address. Set the JWT template name to turn it on; the
++# CLI OAuth client ID lets `t3 connect` sign in too. Both are public identifiers.
++# CLERK_JWT_TEMPLATE=t3-relay
++# CLERK_CLI_OAUTH_CLIENT_ID=...
+ # Optional: deletes a user's relay data when Clerk deletes the user. Create a
+ # webhook endpoint at https://<relay domain>/v1/webhooks/clerk subscribed to
+ # `user.deleted` and paste its signing secret here. Unset disables the route.
+diff --git a/infra/relay/src/http/ConnectServiceDiscovery.test.ts b/infra/relay/src/http/ConnectServiceDiscovery.test.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..574d8999b065b0784b82aa0948138e2b7268b317
+--- /dev/null
++++ b/infra/relay/src/http/ConnectServiceDiscovery.test.ts
+@@ -0,0 +1,83 @@
++import { describe, expect, it } from "@effect/vitest";
++import { checkConnectService } from "@t3tools/shared/connectService";
++import * as Effect from "effect/Effect";
++import * as HttpRouter from "effect/http/HttpRouter";
++import * as HttpServer from "effect/http/HttpServer";
++import * as HttpServerResponse from "effect/http/HttpServerResponse";
++import * as Layer from "effect/Layer";
++
++import * as ConnectServiceDiscovery from "./ConnectServiceDiscovery.ts";
++
++const RELAY = "https://relay.example.test";
++const SETTINGS = {
++  relayUrl: RELAY,
++  clerkPublishableKey: `pk_live_${btoa("clerk.example.test$")}`,
++  clerkJwtTemplate: "t3-relay",
++  clerkCliOAuthClientId: "cli-client",
++};
++
++/** The route beside the metadata every relay serves, driven the way an app's settings screen does. */
++const relay = (settings: ConnectServiceDiscovery.ConnectServiceDiscoverySettings) =>
++  Effect.acquireRelease(
++    Effect.sync(() =>
++      HttpRouter.toWebHandler(
++        Layer.mergeAll(
++          ConnectServiceDiscovery.layerRoute(settings),
++          HttpRouter.add(
++            "GET",
++            "/.well-known/oauth-authorization-server",
++            HttpServerResponse.jsonUnsafe({ issuer: settings.relayUrl }),
++          ),
++        ).pipe(Layer.provide(HttpServer.layerServices)),
++        { disableLogger: true },
++      ),
++    ),
++    (app) => Effect.promise(() => app.dispose()),
++  ).pipe(
++    Effect.map((app) => ({
++      fetch: (url: string) => app.handler(new Request(url)),
++    })),
++  );
++
++const NO_SIGN_IN_VALUES = {
++  clerkPublishableKey: "",
++  clerkJwtTemplate: "",
++  clerkCliOAuthClientId: "",
++};
++
++describe("connect service discovery route", () => {
++  it.effect("gives an app everything it needs from the relay address alone", () =>
++    Effect.gen(function* () {
++      const { fetch } = yield* relay(SETTINGS);
++
++      const response = yield* Effect.promise(() => fetch(`${RELAY}/.well-known/t3-connect.json`));
++      expect(response.headers.get("cache-control")).toBe("public, max-age=300");
++      expect(yield* Effect.promise(() => response.json())).toEqual({
++        version: 1,
++        relayUrl: RELAY,
++        clerk: {
++          publishableKey: SETTINGS.clerkPublishableKey,
++          jwtTemplate: "t3-relay",
++          cliOAuthClientId: "cli-client",
++        },
++      });
++      expect(
++        yield* Effect.promise(() =>
++          checkConnectService({ relayUrl: RELAY, ...NO_SIGN_IN_VALUES }, { fetch }),
++        ),
++      ).toEqual({ _tag: "Ready", settings: { ...SETTINGS, source: "discovered" } });
++    }).pipe(Effect.scoped),
++  );
++
++  it.effect("publishes nothing until the relay is given its token template", () =>
++    Effect.gen(function* () {
++      const { fetch } = yield* relay({ ...SETTINGS, clerkJwtTemplate: undefined });
++
++      expect(
++        yield* Effect.promise(() =>
++          checkConnectService({ relayUrl: RELAY, ...NO_SIGN_IN_VALUES }, { fetch }),
++        ),
++      ).toEqual({ _tag: "NotPublished" });
++    }).pipe(Effect.scoped),
++  );
++});
+diff --git a/infra/relay/src/http/ConnectServiceDiscovery.ts b/infra/relay/src/http/ConnectServiceDiscovery.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..182cddde2cd9ed5eded3a0175874bfa3dc364e67
+--- /dev/null
++++ b/infra/relay/src/http/ConnectServiceDiscovery.ts
+@@ -0,0 +1,35 @@
++import { CONNECT_SERVICE_DISCOVERY_PATH } from "@t3tools/contracts";
++import {
++  connectServiceDiscoveryDocument,
++  validateConnectServiceValues,
++} from "@t3tools/shared/connectService";
++import * as HttpRouter from "effect/http/HttpRouter";
++import * as HttpServerResponse from "effect/http/HttpServerResponse";
++
++export interface ConnectServiceDiscoverySettings {
++  readonly relayUrl: string;
++  readonly clerkPublishableKey: string;
++  readonly clerkJwtTemplate: string | undefined;
++  readonly clerkCliOAuthClientId: string | undefined;
++}
++
++/**
++ * Publishes the public sign-in values an app needs to use this relay. A relay that was not
++ * given its token template name answers 404, and apps then ask for the values by hand.
++ */
++function connectServiceDiscoveryResponse(settings: ConnectServiceDiscoverySettings) {
++  const validated = validateConnectServiceValues({
++    relayUrl: settings.relayUrl,
++    clerkPublishableKey: settings.clerkPublishableKey,
++    clerkJwtTemplate: settings.clerkJwtTemplate ?? null,
++    clerkCliOAuthClientId: settings.clerkCliOAuthClientId ?? null,
++  });
++  return validated.ok
++    ? HttpServerResponse.jsonUnsafe(connectServiceDiscoveryDocument(validated.values), {
++        headers: { "cache-control": "public, max-age=300" },
++      })
++    : HttpServerResponse.empty({ status: 404 });
++}
++
++export const layerRoute = (settings: ConnectServiceDiscoverySettings) =>
++  HttpRouter.add("GET", CONNECT_SERVICE_DISCOVERY_PATH, connectServiceDiscoveryResponse(settings));
+diff --git a/infra/relay/src/worker.ts b/infra/relay/src/worker.ts
+index 3c9492a020af8284ec32913c2baf25a2ad4725d2..3617dec027f53b51f19d1a3175339f7cb6a97964 100644
+--- a/infra/relay/src/worker.ts
++++ b/infra/relay/src/worker.ts
+@@ -30,6 +30,7 @@ import {
+ } from "./http/Api.ts";
+ import * as CloudMintSigner from "./auth/CloudMintSigner.ts";
+ import * as RelayHttpApi from "./http/Api.ts";
++import * as ConnectServiceDiscovery from "./http/ConnectServiceDiscovery.ts";
+ import { ManagedEndpointZone, RelayApiZone, RelayDeploymentConfig } from "./zone.ts";
+ import { RelayObservability } from "./observability.ts";
+ import * as Observability from "./observability.ts";
+@@ -173,6 +174,19 @@ export const layer = Api.make(
+     const clerkSecretKey = yield* Config.Redacted("CLERK_SECRET_KEY");
+     const clerkPublishableKey = yield* Config.String("CLERK_PUBLISHABLE_KEY");
+     const clerkJwtAudience = yield* Config.String("CLERK_JWT_AUDIENCE");
++    // Public values apps read from the well-known document; without a template none is served.
++    const clerkJwtTemplate = Option.getOrUndefined(
++      Option.filter(
++        yield* Config.option(Config.String("CLERK_JWT_TEMPLATE")),
++        (value) => value.trim().length > 0,
++      ),
++    );
++    const clerkCliOAuthClientId = Option.getOrUndefined(
++      Option.filter(
++        yield* Config.option(Config.String("CLERK_CLI_OAUTH_CLIENT_ID")),
++        (value) => value.trim().length > 0,
++      ),
++    );
+     const clerkWebhookSigningSecret = Option.getOrUndefined(
+       Option.filter(
+         yield* Config.option(Config.Redacted("CLERK_WEBHOOK_SIGNING_SECRET")),
+@@ -563,6 +577,12 @@ export const layer = Api.make(
+         ),
+         HttpApiScalar.layer(RelayApi, { path: "/docs" }),
+         RelayHttpApi.layerDocsRedirectRoute,
++        ConnectServiceDiscovery.layerRoute({
++          relayUrl: relayPublicOrigin,
++          clerkPublishableKey,
++          clerkJwtTemplate,
++          clerkCliOAuthClientId,
++        }),
+       ).pipe(
+         Layer.provide([Etag.layerWeak, layerHttpPlatformNotSupported, RelayHttpApi.layerCors]),
+       ),

@@ -1,0 +1,776 @@
+diff --git a/apps/mobile/modules/t3-ssh/android/src/test/java/expo/modules/t3ssh/T3ServerEndToEndTest.kt b/apps/mobile/modules/t3-ssh/android/src/test/java/expo/modules/t3ssh/T3ServerEndToEndTest.kt
+index b2935466c50098831615f724b504231a983c3e6f..9fe9e31a560ee699ae04c5c42ee6f367371bd0f3 100644
+--- a/apps/mobile/modules/t3-ssh/android/src/test/java/expo/modules/t3ssh/T3ServerEndToEndTest.kt
++++ b/apps/mobile/modules/t3-ssh/android/src/test/java/expo/modules/t3ssh/T3ServerEndToEndTest.kt
+@@ -42,7 +42,8 @@ class T3ServerEndToEndTest {
+       scripts != null && home != null && TestSshd.available
+     )
+     scripts!!
+-    val stateKey = File(scripts, "state-key").readText().trim()
++    val launchCommand = File(scripts, "launch-command").readText()
++    val pairingCommand = File(scripts, "pairing-command").readText()
+ 
+     val target =
+       sshd("environment=\"HOME=$home\" ${key.publicKeyLine("e2e")}", "PermitUserEnvironment yes")
+@@ -60,11 +61,8 @@ class T3ServerEndToEndTest {
+     )
+     val session = (result as SshConnectResult.Connected).session.also(cleanup::add)
+ 
+-    val launch = session.exec(
+-      "sh -l -s -- $stateKey",
+-      File(scripts, "launch.sh").readText(),
+-      LAUNCH_TIMEOUT_MS
+-    )
++    val launch =
++      session.exec(launchCommand, File(scripts, "launch.sh").readText(), LAUNCH_TIMEOUT_MS)
+     assertEquals(launch.stderr, 0, launch.exitCode)
+     val remotePort = field(launch.stdout, "remotePort").toInt()
+     try {
+@@ -73,7 +71,8 @@ class T3ServerEndToEndTest {
+       val descriptor = http(localPort, "/.well-known/t3/environment")
+       assertTrue(descriptor, descriptor.contains("\"environmentId\""))
+ 
+-      val pairing = session.exec("sh -s", File(scripts, "pairing.sh").readText(), LAUNCH_TIMEOUT_MS)
++      val pairing =
++        session.exec(pairingCommand, File(scripts, "pairing.sh").readText(), LAUNCH_TIMEOUT_MS)
+       assertEquals(pairing.stderr, 0, pairing.exitCode)
+       val token = http(
+         localPort,
+@@ -89,11 +88,8 @@ class T3ServerEndToEndTest {
+       assertTrue(sessionState, sessionState.contains("\"authenticated\":true"))
+ 
+       // A second launch finds the running server instead of starting another.
+-      val again = session.exec(
+-        "sh -l -s -- $stateKey",
+-        File(scripts, "launch.sh").readText(),
+-        LAUNCH_TIMEOUT_MS
+-      )
++      val again =
++        session.exec(launchCommand, File(scripts, "launch.sh").readText(), LAUNCH_TIMEOUT_MS)
+       assertEquals(remotePort, field(again.stdout, "remotePort").toInt())
+     } finally {
+       session.exec("sh -s", File(scripts, "stop.sh").readText(), 60_000)
+diff --git a/apps/mobile/modules/t3-ssh/e2e/write-remote-scripts.ts b/apps/mobile/modules/t3-ssh/e2e/write-remote-scripts.ts
+index dd0b71ee86966c4084a95560d6c1b68492ed2b69..b10d7a44394ac4561699b2fcb3e0bf70fde94589 100644
+--- a/apps/mobile/modules/t3-ssh/e2e/write-remote-scripts.ts
++++ b/apps/mobile/modules/t3-ssh/e2e/write-remote-scripts.ts
+@@ -8,6 +8,7 @@ import {
+   buildRemoteLaunchScript,
+   buildRemotePairingScript,
+   buildRemoteStopScript,
++  remoteLoginShellArgs,
+ } from "@t3tools/ssh/remoteScripts";
+ 
+ const [outDir, archiveVersion] = process.argv.slice(2);
+@@ -19,9 +20,14 @@ const stateKey = "0123456789abcdef";
+ const runner = { archiveVersion };
+ NodeFS.mkdirSync(outDir, { recursive: true });
+ NodeFS.writeFileSync(NodePath.join(outDir, "state-key"), stateKey);
++NodeFS.writeFileSync(
++  NodePath.join(outDir, "launch-command"),
++  remoteLoginShellArgs(stateKey).join(" "),
++);
++NodeFS.writeFileSync(NodePath.join(outDir, "pairing-command"), remoteLoginShellArgs().join(" "));
+ NodeFS.writeFileSync(NodePath.join(outDir, "launch.sh"), buildRemoteLaunchScript(runner));
+ NodeFS.writeFileSync(
+   NodePath.join(outDir, "pairing.sh"),
+   buildRemotePairingScript(stateKey, runner),
+ );
+-NodeFS.writeFileSync(NodePath.join(outDir, "stop.sh"), buildRemoteStopScript(stateKey));
++NodeFS.writeFileSync(NodePath.join(outDir, "stop.sh"), buildRemoteStopScript(stateKey, null));
+diff --git a/apps/mobile/plugins/withAndroidClientCertificates.cjs b/apps/mobile/plugins/withAndroidClientCertificates.cjs
+index f2bdaa04a1be0c99b27e6da78d04a010de59edc2..dfdd3472c9967ed5759c709904e372af9cbe4677 100644
+--- a/apps/mobile/plugins/withAndroidClientCertificates.cjs
++++ b/apps/mobile/plugins/withAndroidClientCertificates.cjs
+@@ -12,7 +12,10 @@ function reassertAfterLifecycle(source) {
+     throw new Error("Cannot re-assert client certificates after Expo lifecycle startup");
+   const offset = matches[0].index + matches[0][0].length;
+   if (source.includes(reassert)) {
+-    if (!source.slice(offset).trimStart().startsWith(reassert) || source.split(reassert).length !== 2)
++    if (
++      !source.slice(offset).trimStart().startsWith(reassert) ||
++      source.split(reassert).length !== 2
++    )
+       throw new Error(
+         "Client certificate transport must be re-asserted immediately after Expo lifecycle startup",
+       );
+diff --git a/apps/mobile/src/connection/ssh/gateway.test.ts b/apps/mobile/src/connection/ssh/gateway.test.ts
+index 1ff035305e4b771b7f025ad7047e188dff09fae3..6a03e0af5585a56ae7abe84667c3ba957c7f61b8 100644
+--- a/apps/mobile/src/connection/ssh/gateway.test.ts
++++ b/apps/mobile/src/connection/ssh/gateway.test.ts
+@@ -31,6 +31,11 @@ vi.mock("@t3tools/client-runtime/authorization", () => ({
+ import { makeSshGateway } from "./gateway";
+ import type { SshConnectResult, SshNative } from "./native";
+ 
++// The desktop's login-shell wrapper: the user's own shell reads its profile, then runs sh.
++const loginShell = (args: string) =>
++  `sh -c 'case "\${SHELL##*/}" in bash|zsh|ksh|fish|nu) exec "$SHELL" -l -c "exec sh -s${args}" ;; *) exec sh -l -s${args} ;; esac'`;
++const PAIRING_COMMAND = loginShell("");
++
+ const CONFIG = `
+ Host jump
+   HostName jump.example
+@@ -73,9 +78,13 @@ function setup(options: { readonly connect?: () => SshConnectResult } = {}) {
+       return { status: "connected", sessionId };
+     }),
+     exec: vi.fn(async (_id: string, command: string, _stdin: string, _timeoutMs: number) =>
+-      command.startsWith("sh -l -s")
+-        ? { exitCode: 0, stdout: 'motd\n{"remotePort":3777,"serverKind":"external"}\n', stderr: "" }
+-        : { exitCode: 0, stdout: '{"credential":"pairing-1"}\n', stderr: "" },
++      command === PAIRING_COMMAND
++        ? { exitCode: 0, stdout: '{"credential":"pairing-1"}\n', stderr: "" }
++        : {
++            exitCode: 0,
++            stdout: 'motd\n{"remotePort":3777,"serverKind":"external"}\n',
++            stderr: "",
++          },
+     ),
+     forward: vi.fn(async (_id: string, _remotePort: number) => 41001),
+     isOpen: (id: string) => open.has(id),
+@@ -118,8 +127,8 @@ describe("mobile SSH gateway", () => {
+         { host: "127.0.0.1", port: 2222, user: "dev", hostKeyAlias: null },
+       ]);
+       expect(native.exec.mock.calls.map((call) => call[1])).toEqual([
+-        `sh -l -s -- ${stateKey}`,
+-        "sh -s",
++        loginShell(` -- ${stateKey}`),
++        PAIRING_COMMAND,
+       ]);
+       expect(native.forward).toHaveBeenCalledWith("session-1", 3777);
+       expect(http.exchange).toHaveBeenCalledWith(
+@@ -174,7 +183,7 @@ describe("mobile SSH gateway", () => {
+       });
+ 
+       expect(prepared.bearerToken).toBe("token-new");
+-      expect(native.exec.mock.calls.map((call) => call[1])).toContain("sh -s");
++      expect(native.exec.mock.calls.map((call) => call[1])).toContain(PAIRING_COMMAND);
+     }),
+   );
+ 
+diff --git a/apps/mobile/src/connection/ssh/gateway.ts b/apps/mobile/src/connection/ssh/gateway.ts
+index 0583fbdf77dfa4335788574edb0d441c0110896f..9c9508a6b022c17a4cc4cf362a2c4fdbdae5ce7f 100644
+--- a/apps/mobile/src/connection/ssh/gateway.ts
++++ b/apps/mobile/src/connection/ssh/gateway.ts
+@@ -25,6 +25,7 @@ import {
+   decodeRemoteLaunchOutput,
+   decodeRemotePairingOutput,
+   REMOTE_ARCHIVE_LAUNCH_TIMEOUT_MS,
++  remoteLoginShellArgs,
+   targetConnectionKey,
+ } from "@t3tools/ssh/remoteScripts";
+ import * as Effect from "effect/Effect";
+@@ -37,7 +38,7 @@ import { parseSshConfig, resolveSshHost } from "./sshConfig";
+  * The t3 release a host is given when it has no server running yet. The desktop passes its
+  * own version here; keep this in step with the server version this build is paired with.
+  */
+-export const REMOTE_T3_VERSION = "0.1.12";
++const REMOTE_T3_VERSION = "0.1.12";
+ 
+ export interface SshGatewayDependencies {
+   readonly native: SshNative;
+@@ -126,7 +127,7 @@ export const makeSshGateway = Effect.fn("mobile.ssh.makeGateway")(function* (
+       const launch = yield* call(() =>
+         native.exec(
+           sessionId,
+-          `sh -l -s -- ${stateKey}`,
++          remoteLoginShellArgs(stateKey).join(" "),
+           buildRemoteLaunchScript(runner),
+           REMOTE_ARCHIVE_LAUNCH_TIMEOUT_MS,
+         ),
+@@ -174,7 +175,7 @@ export const makeSshGateway = Effect.fn("mobile.ssh.makeGateway")(function* (
+           const pairing = yield* call(() =>
+             native.exec(
+               sessionId,
+-              "sh -s",
++              remoteLoginShellArgs().join(" "),
+               buildRemotePairingScript(stateKey, runner),
+               REMOTE_ARCHIVE_LAUNCH_TIMEOUT_MS,
+             ),
+diff --git a/apps/mobile/src/connection/ssh/native.ts b/apps/mobile/src/connection/ssh/native.ts
+index 78e96fe8bebaaff479bc87f4f3706e9205ee90eb..6b2a61c47ab72768a911eb21c4acbaa776320510 100644
+--- a/apps/mobile/src/connection/ssh/native.ts
++++ b/apps/mobile/src/connection/ssh/native.ts
+@@ -1,4 +1,7 @@
+ import { requireOptionalNativeModule } from "expo";
++import { msg } from "gt-react-native";
++
++import { m } from "../../i18n/messages";
+ 
+ export interface SshPublicKey {
+   readonly line: string;
+@@ -79,9 +82,14 @@ export function sshErrorCode(cause: unknown): string | null {
+ export function sshFailureMessage(cause: unknown): string {
+   switch (sshErrorCode(cause)) {
+     case "ERR_SSH_AUTH":
+-      return "The host did not accept this device's SSH key. Add the key from Settings > SSH to its authorized_keys.";
++      return m(
++        msg(
++          "The host did not accept this device's SSH key. Add the key from Settings > SSH to its {file}.",
++          { file: "authorized_keys" },
++        ),
++      );
+     case "ERR_SSH_NO_KEY":
+-      return "Create an SSH key in Settings > SSH first.";
++      return m(msg("Create an SSH key in Settings > SSH first."));
+     default:
+       return cause instanceof Error ? cause.message : String(cause);
+   }
+diff --git a/apps/mobile/src/features/connection/ClientCertificateField.tsx b/apps/mobile/src/features/connection/ClientCertificateField.tsx
+index 28507b2af890e8906bb3d62ab34e873017f4dcd1..13229d8745c4a1f3bb6e7976ccaf0d2ac0eab811 100644
+--- a/apps/mobile/src/features/connection/ClientCertificateField.tsx
++++ b/apps/mobile/src/features/connection/ClientCertificateField.tsx
+@@ -1,3 +1,4 @@
++import { useGT } from "gt-react-native";
+ import { useState, useSyncExternalStore } from "react";
+ import { Pressable, View } from "react-native";
+ 
+@@ -33,14 +34,15 @@ export function ClientCertificateField(props: {
+   );
+   const [busy, setBusy] = useState(false);
+   const [expanded, setExpanded] = useState(false);
++  const gt = useGT();
+   if (!clientCertificatesAvailable) return null;
+   const act = (remove: boolean) => {
+     setBusy(true);
+     void (remove ? removeClientCertificate(endpoint) : chooseClientCertificate(endpoint))
+       .catch((error: unknown) => {
+         Dialog.alert(
+-          "Client certificate",
+-          error instanceof Error ? error.message : "Could not select certificate.",
++          gt("Client certificate"),
++          error instanceof Error ? error.message : gt("Could not select certificate."),
+         );
+       })
+       .finally(() => setBusy(false));
+@@ -55,9 +57,9 @@ export function ClientCertificateField(props: {
+         className="flex-row items-center justify-between px-4 py-3"
+       >
+         <View className="gap-1">
+-          <Text className="text-sm text-foreground-muted">Advanced settings</Text>
++          <Text className="text-sm text-foreground-muted">{gt("Advanced settings")}</Text>
+           {alias ? (
+-            <Text className="text-xs text-foreground-muted">Certificate selected</Text>
++            <Text className="text-xs text-foreground-muted">{gt("Certificate selected")}</Text>
+           ) : null}
+         </View>
+         <SymbolView
+@@ -69,12 +71,14 @@ export function ClientCertificateField(props: {
+       {expanded ? (
+         <View className="gap-2 px-4 pb-3">
+           <Text className="text-2xs font-t3-bold uppercase text-foreground-muted">
+-            Client certificate (optional)
++            {gt("Client certificate (optional)")}
+           </Text>
+           <Text className="text-sm text-foreground-muted">
+-            {alias ?? "None selected"}.{" "}
++            {alias ?? gt("None selected")}.{" "}
+             {props.description ??
+-              "Applies to this HTTPS host and port, including other environments using the same address."}
++              gt(
++                "Applies to this HTTPS host and port, including other environments using the same address.",
++              )}
+           </Text>
+           <Pressable
+             accessibilityRole="button"
+@@ -83,7 +87,11 @@ export function ClientCertificateField(props: {
+             className="rounded-xl bg-input px-4 py-3"
+           >
+             <Text className="text-foreground">
+-              {busy ? "Please wait…" : alias ? "Change certificate" : "Select certificate"}
++              {busy
++                ? gt("Please wait…")
++                : alias
++                  ? gt("Change certificate")
++                  : gt("Select certificate")}
+             </Text>
+           </Pressable>
+           {alias ? (
+@@ -93,7 +101,7 @@ export function ClientCertificateField(props: {
+               onPress={() => act(true)}
+               className="px-4 py-2"
+             >
+-              <Text className="text-danger-foreground">Remove certificate</Text>
++              <Text className="text-danger-foreground">{gt("Remove certificate")}</Text>
+             </Pressable>
+           ) : null}
+         </View>
+diff --git a/apps/mobile/src/features/connection/ConnectionEnvironmentRow.tsx b/apps/mobile/src/features/connection/ConnectionEnvironmentRow.tsx
+index 23a75a6def7b509c3c66087f3dc36d4aa18a3252..3960680a29b63b8c295b621f094c66e26bcfed3d 100644
+--- a/apps/mobile/src/features/connection/ConnectionEnvironmentRow.tsx
++++ b/apps/mobile/src/features/connection/ConnectionEnvironmentRow.tsx
+@@ -246,7 +246,10 @@ export function ConnectionEnvironmentRow(props: {
+                 <ClientCertificateField
+                   host={relayCertificateScope}
+                   endpoint={relayCertificateScope}
+-                  description={`Applies to every machine under ${relayCertificateScope.slice(8, -1)}, including T3 Connect machines added later. A certificate chosen for one exact address takes priority.`}
++                  description={gt(
++                    "Applies to every machine under {domain}, including {product} machines added later. A certificate chosen for one exact address takes priority.",
++                    { domain: relayCertificateScope.slice(8, -1), product: "T3 Connect" },
++                  )}
+                 />
+               ) : null}
+             </>
+diff --git a/apps/mobile/src/features/connection/SshEnvironmentSection.tsx b/apps/mobile/src/features/connection/SshEnvironmentSection.tsx
+index e67255f6a301b81a3611a3d1a07b717d9ecdf5f3..2760e4534abe23dc819a1c98e6dcb90095f00bfd 100644
+--- a/apps/mobile/src/features/connection/SshEnvironmentSection.tsx
++++ b/apps/mobile/src/features/connection/SshEnvironmentSection.tsx
+@@ -2,6 +2,7 @@ import { useFocusEffect, useNavigation } from "@react-navigation/native";
+ import * as Cause from "effect/Cause";
+ import { AsyncResult } from "effect/reactivity";
+ import * as Haptics from "expo-haptics";
++import { msg, useGT } from "gt-react-native";
+ import { useCallback, useState } from "react";
+ import { View } from "react-native";
+ 
+@@ -22,6 +23,7 @@ import {
+   type SshConfig,
+   type SshConfigHost,
+ } from "../../connection/ssh/sshConfig";
++import { m } from "../../i18n/messages";
+ import { useAtomCommand } from "../../state/use-atom-command";
+ 
+ /** Hosts from the app's SSH config, on platforms with the SSH module. */
+@@ -33,6 +35,7 @@ export function SshEnvironmentSection(props: { readonly onConnected: () => void
+ 
+ function SshHosts(props: { readonly native: SshNative; readonly onConnected: () => void }) {
+   const { native, onConnected } = props;
++  const gt = useGT();
+   const navigation = useNavigation();
+   const connectSsh = useAtomCommand(connectSshEnvironment, { reportFailure: false });
+   const [config, setConfig] = useState<SshConfig>({ hosts: [], problems: [] });
+@@ -66,9 +69,9 @@ function SshHosts(props: { readonly native: SshNative; readonly onConnected: ()
+ 
+   const connect = async (alias: string) => {
+     if (!hasKey) {
+-      Dialog.alert("Create an SSH key first", "Then add its public key to the host.", [
+-        { text: "Cancel", style: "cancel" },
+-        { text: "Open SSH settings", onPress: openSettings },
++      Dialog.alert(gt("Create an SSH key first"), gt("Then add its public key to the host."), [
++        { text: gt("Cancel"), style: "cancel" },
++        { text: gt("Open SSH settings"), onPress: openSettings },
+       ]);
+       return;
+     }
+@@ -82,12 +85,14 @@ function SshHosts(props: { readonly native: SshNative; readonly onConnected: ()
+         : Haptics.NotificationFeedbackType.Error,
+     );
+     if (failure === null) onConnected();
+-    else Dialog.alert("Could not connect", failure);
++    else Dialog.alert(gt("Could not connect"), failure);
+   };
+ 
+   return (
+     <View collapsable={false} className="gap-2">
+-      <Text className="px-4 text-sm font-t3-medium text-foreground-muted">Or connect over SSH</Text>
++      <Text className="px-4 text-sm font-t3-medium text-foreground-muted">
++        {gt("Or connect over SSH")}
++      </Text>
+       <View className="overflow-hidden rounded-[26px] border-continuous bg-grouped-card">
+         {config.hosts.map((host) => (
+           <ListActionRow
+@@ -102,13 +107,15 @@ function SshHosts(props: { readonly native: SshNative; readonly onConnected: ()
+         ))}
+         <ListActionRow
+           icon="slider.horizontal.3"
+-          label={config.hosts.length === 0 ? "Set up SSH" : "SSH key and hosts"}
++          label={config.hosts.length === 0 ? gt("Set up SSH") : gt("SSH key and hosts")}
+           disabled={connecting !== null}
+           onPress={openSettings}
+         />
+       </View>
+       <Text className="px-4 text-sm leading-normal text-foreground-muted">
+-        Starts T3 Code on the host if needed, using this device's own SSH key.
++        {gt("Starts {product} on the host if needed, using this device's own SSH key.", {
++          product: "T3 Code",
++        })}
+       </Text>
+     </View>
+   );
+@@ -123,9 +130,18 @@ function describeHost(host: SshConfigHost): string {
+ function confirmHostKey(rejection: SshHostKeyRejection): Promise<boolean> {
+   return new Promise((resolve) =>
+     Dialog.confirm({
+-      title: `Trust ${rejection.knownHostsName}?`,
+-      message: `This is the first connection to this host. Its ${rejection.keyType} key fingerprint is\n\n${rejection.fingerprint}\n\nCheck it against ssh-keygen -lf on the host before trusting it.`,
+-      confirmText: "Trust",
++      title: m(msg("Trust {host}?", { host: rejection.knownHostsName })),
++      message: m(
++        msg(
++          "This is the first connection to this host. Its {keyType} key fingerprint is\n\n{fingerprint}\n\nCheck it against {command} on the host before trusting it.",
++          {
++            keyType: rejection.keyType,
++            fingerprint: rejection.fingerprint,
++            command: "ssh-keygen -lf",
++          },
++        ),
++      ),
++      confirmText: m(msg("Trust", { $context: "verb, button that accepts an SSH host key" })),
+       onConfirm: () => resolve(true),
+       onCancel: () => resolve(false),
+     }),
+diff --git a/apps/mobile/src/features/settings/SettingsClientCertificateRouteScreen.tsx b/apps/mobile/src/features/settings/SettingsClientCertificateRouteScreen.tsx
+index 6be2c83c684ca175e6aec7df2c2fa16f878e0595..0a3e4cc3f45e7989124b91a1180e905ab2067530 100644
+--- a/apps/mobile/src/features/settings/SettingsClientCertificateRouteScreen.tsx
++++ b/apps/mobile/src/features/settings/SettingsClientCertificateRouteScreen.tsx
+@@ -1,3 +1,4 @@
++import { useGT } from "gt-react-native";
+ import { useState, useSyncExternalStore } from "react";
+ import { Pressable, View } from "react-native";
+ import { useSafeAreaInsets } from "react-native-safe-area-context";
+@@ -22,10 +23,11 @@ function subscribe(listener: () => void) {
+ }
+ 
+ export function SettingsClientCertificateRouteScreen() {
++  const gt = useGT();
+   const insets = useSafeAreaInsets();
+   const origin = relayCertificateOrigin();
+   return (
+-    <SettingsScreen title="Client certificate">
++    <SettingsScreen title={gt("Client certificate")}>
+       <ScrollView
+         contentInsetAdjustmentBehavior="automatic"
+         showsVerticalScrollIndicator={false}
+@@ -35,11 +37,11 @@ export function SettingsClientCertificateRouteScreen() {
+       >
+         {!clientCertificatesAvailable ? (
+           <Text className="px-4 text-foreground-muted">
+-            Client certificates need the Android custom build.
++            {gt("Client certificates need the Android custom build.")}
+           </Text>
+         ) : origin === null ? (
+           <Text className="px-4 text-foreground-muted">
+-            This build has no T3 Connect relay configured.
++            {gt("This build has no {product} relay configured.", { product: "T3 Connect" })}
+           </Text>
+         ) : (
+           <DefaultCertificate origin={origin} />
+@@ -50,6 +52,7 @@ export function SettingsClientCertificateRouteScreen() {
+ }
+ 
+ function DefaultCertificate({ origin }: { readonly origin: string }) {
++  const gt = useGT();
+   const domain = origin.slice("https://".length, -1);
+   const alias = useSyncExternalStore(
+     subscribe,
+@@ -62,21 +65,26 @@ function DefaultCertificate({ origin }: { readonly origin: string }) {
+     void (remove ? removeClientCertificate(origin) : chooseClientCertificate(origin))
+       .catch((error: unknown) => {
+         Dialog.alert(
+-          "Client certificate",
+-          error instanceof Error ? error.message : "Could not select certificate.",
++          gt("Client certificate"),
++          error instanceof Error ? error.message : gt("Could not select certificate."),
+         );
+       })
+       .finally(() => setBusy(false));
+   };
+   return (
+     <SettingsSection
+-      title="Default for T3 Connect machines"
+-      footer={`Sent to every machine under ${domain} that asks for one, including machines added later. A certificate chosen for one environment's own address takes priority.`}
++      title={gt("Default for {product} machines", { product: "T3 Connect" })}
++      footer={gt(
++        "Sent to every machine under {domain} that asks for one, including machines added later. A certificate chosen for one environment's own address takes priority.",
++        { domain },
++      )}
+     >
+       <View className="gap-3 px-4 py-4">
+         <View className="gap-1">
+-          <Text className="text-sm text-foreground-muted">Selected certificate</Text>
+-          <Text className="text-base text-foreground">{alias ?? "None"}</Text>
++          <Text className="text-sm text-foreground-muted">{gt("Selected certificate")}</Text>
++          <Text className="text-base text-foreground">
++            {alias ?? gt("None", { $context: "no client certificate is selected" })}
++          </Text>
+         </View>
+         <Pressable
+           accessibilityRole="button"
+@@ -85,7 +93,11 @@ function DefaultCertificate({ origin }: { readonly origin: string }) {
+           className="rounded-xl bg-input px-4 py-3"
+         >
+           <Text className="text-foreground">
+-            {busy ? "Please wait…" : alias ? "Change certificate" : "Select certificate"}
++            {busy
++              ? gt("Please wait…")
++              : alias
++                ? gt("Change certificate")
++                : gt("Select certificate")}
+           </Text>
+         </Pressable>
+         {alias ? (
+@@ -95,7 +107,7 @@ function DefaultCertificate({ origin }: { readonly origin: string }) {
+             onPress={() => act(true)}
+             className="px-4 py-2"
+           >
+-            <Text className="text-danger-foreground">Remove certificate</Text>
++            <Text className="text-danger-foreground">{gt("Remove certificate")}</Text>
+           </Pressable>
+         ) : null}
+       </View>
+diff --git a/apps/mobile/src/features/settings/SettingsRouteScreen.tsx b/apps/mobile/src/features/settings/SettingsRouteScreen.tsx
+index 2dccbf76b066d9000e657cf6ab1ded93ae9e9bc3..54004663f1418e829ffc5c8ab293eb5913b2a8ec 100644
+--- a/apps/mobile/src/features/settings/SettingsRouteScreen.tsx
++++ b/apps/mobile/src/features/settings/SettingsRouteScreen.tsx
+@@ -141,7 +141,7 @@ function ConfiguredSettingsRouteScreen() {
+           label: gt("Notifications"),
+           target: "SettingsNotifications",
+         },
+-        ...sshRows,
++        ...sshRows(gt),
+       ]}
+     />
+   );
+@@ -154,13 +154,13 @@ function LocalSettingsRouteScreen() {
+     <SettingsList
+       connections={[
+         environmentsRow(gt("Environments"), Object.keys(savedConnectionsById).length),
+-        ...sshRows,
++        ...sshRows(gt),
+       ]}
+     />
+   );
+ }
+ 
+-const sshRows: readonly SettingsListRow[] = [
++const sshRows = (gt: ReturnType<typeof useGT>): readonly SettingsListRow[] => [
+   ...(sshNative === null
+     ? []
+     : [{ id: "SettingsSsh", icon: "terminal", label: "SSH", target: "SettingsSsh" } as const]),
+@@ -169,7 +169,7 @@ const sshRows: readonly SettingsListRow[] = [
+         {
+           id: "SettingsClientCertificate",
+           icon: { ios: "lock", android: "lock" },
+-          label: "Client certificate",
++          label: gt("Client certificate"),
+           target: "SettingsClientCertificate",
+         } as const,
+       ]
+diff --git a/apps/mobile/src/features/settings/SettingsSshRouteScreen.tsx b/apps/mobile/src/features/settings/SettingsSshRouteScreen.tsx
+index 3815cd4b9aa39e951ec5a29ecda73cfa2c4046d6..704468b7fafc2dc8d1d82ad4907fda4cce61327e 100644
+--- a/apps/mobile/src/features/settings/SettingsSshRouteScreen.tsx
++++ b/apps/mobile/src/features/settings/SettingsSshRouteScreen.tsx
+@@ -1,5 +1,6 @@
+ import * as Clipboard from "expo-clipboard";
+ import * as Haptics from "expo-haptics";
++import { useGT } from "gt-react-native";
+ import { useEffect, useMemo, useState } from "react";
+ import { Share, View } from "react-native";
+ import { useSafeAreaInsets } from "react-native-safe-area-context";
+@@ -23,6 +24,7 @@ const KEY_COMMENT = "t3code-android";
+ const CONFIG_PLACEHOLDER = "Host my-server\n  HostName server.example.com\n  User me";
+ 
+ export function SettingsSshRouteScreen() {
++  const gt = useGT();
+   const insets = useSafeAreaInsets();
+   return (
+     <SettingsScreen title="SSH">
+@@ -35,7 +37,9 @@ export function SettingsSshRouteScreen() {
+         contentContainerStyle={{ paddingBottom: Math.max(insets.bottom, 18) + 18 }}
+       >
+         {sshNative === null ? (
+-          <Text className="px-4 text-foreground-muted">SSH environments need the Android app.</Text>
++          <Text className="px-4 text-foreground-muted">
++            {gt("SSH environments need the Android app.")}
++          </Text>
+         ) : (
+           <SshSettings native={sshNative} />
+         )}
+@@ -45,6 +49,7 @@ export function SettingsSshRouteScreen() {
+ }
+ 
+ function SshSettings({ native }: { readonly native: SshNative }) {
++  const gt = useGT();
+   const [key, setKey] = useState<SshPublicKey | null>(null);
+   const [savedConfig, setSavedConfig] = useState("");
+   const [config, setConfig] = useState("");
+@@ -95,9 +100,9 @@ function SshSettings({ native }: { readonly native: SshNative }) {
+ 
+   const forgetHost = (host: SshKnownHost) =>
+     Dialog.confirm({
+-      title: `Remove ${host.names.join(", ")}?`,
+-      message: "You will be asked to check its key again on the next connection.",
+-      confirmText: "Remove",
++      title: gt("Remove {hosts}?", { hosts: host.names.join(", ") }),
++      message: gt("You will be asked to check its key again on the next connection."),
++      confirmText: gt("Remove"),
+       destructive: true,
+       onConfirm: () =>
+         void run(null, async () => {
+@@ -109,17 +114,19 @@ function SshSettings({ native }: { readonly native: SshNative }) {
+   return (
+     <>
+       <SettingsSection
+-        title="This device's key"
++        title={gt("This device's key")}
+         footer={
+           key === null
+-            ? "An ed25519 key that stays on this device and is never backed up."
+-            : "Add this line to ~/.ssh/authorized_keys on each host. It is the only key the app uses."
++            ? gt("An ed25519 key that stays on this device and is never backed up.")
++            : gt("Add this line to {path} on each host. It is the only key the app uses.", {
++                path: "~/.ssh/authorized_keys",
++              })
+         }
+       >
+         {key === null ? (
+           <ListActionRow
+             icon="plus"
+-            label="Create SSH key"
++            label={gt("Create SSH key")}
+             loading={busy === "key"}
+             onPress={createKey}
+           />
+@@ -134,24 +141,26 @@ function SshSettings({ native }: { readonly native: SshNative }) {
+             <View className="ml-4 border-t border-border-subtle" />
+             <ListActionRow
+               icon="doc.on.doc"
+-              label="Copy public key"
++              label={gt("Copy public key")}
+               onPress={() => copyKey(key.line)}
+             />
+             <ListActionRow
+               icon="square.and.arrow.up"
+-              label="Share public key"
++              label={gt("Share public key")}
+               onPress={() => void Share.share({ message: key.line })}
+             />
+             <ListActionRow
+               icon="arrow.clockwise"
+-              label="Replace key"
++              label={gt("Replace key")}
+               tone="danger"
+               loading={busy === "key"}
+               onPress={() =>
+                 Dialog.confirm({
+-                  title: "Replace this device's SSH key?",
+-                  message: "Hosts stop accepting this device until you add the new key to them.",
+-                  confirmText: "Replace",
++                  title: gt("Replace this device's SSH key?"),
++                  message: gt(
++                    "Hosts stop accepting this device until you add the new key to them.",
++                  ),
++                  confirmText: gt("Replace"),
+                   destructive: true,
+                   onConfirm: createKey,
+                 })
+@@ -162,11 +171,13 @@ function SshSettings({ native }: { readonly native: SshNative }) {
+       </SettingsSection>
+ 
+       <SettingsSection
+-        title="SSH config"
+-        footer="Uses Host, HostName, User, Port, ProxyJump and HostKeyAlias, as in ~/.ssh/config."
++        title={gt("SSH config")}
++        footer={gt("Uses Host, HostName, User, Port, ProxyJump and HostKeyAlias, as in {path}.", {
++          path: "~/.ssh/config",
++        })}
+       >
+         <AppTextInput
+-          accessibilityLabel="SSH config"
++          accessibilityLabel={gt("SSH config")}
+           multiline
+           autoCapitalize="none"
+           autoCorrect={false}
+@@ -185,7 +196,7 @@ function SshSettings({ native }: { readonly native: SshNative }) {
+         <View className="ml-4 border-t border-border-subtle" />
+         <ListActionRow
+           icon="checkmark.circle"
+-          label="Save config"
++          label={gt("Save config")}
+           disabled={config === savedConfig}
+           loading={busy === "config"}
+           onPress={saveConfig}
+@@ -193,11 +204,11 @@ function SshSettings({ native }: { readonly native: SshNative }) {
+       </SettingsSection>
+ 
+       <SettingsSection
+-        title="Trusted host keys"
+-        footer="A host's key is added when you confirm it while adding an environment."
++        title={gt("Trusted host keys")}
++        footer={gt("A host's key is added when you confirm it while adding an environment.")}
+       >
+         {knownHosts.length === 0 ? (
+-          <ListActionRow label="None yet" disabled onPress={() => undefined} />
++          <ListActionRow label={gt("None yet")} disabled onPress={() => undefined} />
+         ) : (
+           knownHosts.map((host) => (
+             <ListActionRow
+diff --git a/packages/ssh/src/command.ts b/packages/ssh/src/command.ts
+index 316b55bfee5bb95492d5e7f8ff069aa855639262..b753a5235f305d3bb9193f4f1cfc3de1008545e1 100644
+--- a/packages/ssh/src/command.ts
++++ b/packages/ssh/src/command.ts
+@@ -174,7 +174,7 @@ function redactSshErrorOutput(output: string, keepTail = false): string {
+     : `${redacted.slice(0, MAX_SSH_ERROR_OUTPUT_LENGTH)}\n[truncated]`;
+ }
+ 
+-export function shellSingleQuote(value: string): string {
++function shellSingleQuote(value: string): string {
+   return `'${value.replaceAll("'", "'\\''")}'`;
+ }
+ 
+diff --git a/packages/ssh/src/remoteScripts.ts b/packages/ssh/src/remoteScripts.ts
+index a6bf8b44cf4bb62618f24b8bbe24acf32c8e3caa..81e71bc598f02805d0bbebfa2fc78edc2d02df67 100644
+--- a/packages/ssh/src/remoteScripts.ts
++++ b/packages/ssh/src/remoteScripts.ts
+@@ -16,7 +16,7 @@ import * as Schema from "effect/Schema";
+ 
+ const DEFAULT_REMOTE_PORT = 3773;
+ const REMOTE_PORT_SCAN_WINDOW = 200;
+-export const SSH_READY_PROBE_TIMEOUT_MS = 1_000;
++const SSH_READY_PROBE_TIMEOUT_MS = 1_000;
+ const REMOTE_READY_TIMEOUT_MS = 60_000;
+ export const REMOTE_LAUNCH_BASE_TIMEOUT_MS = 90_000;
+ // Cold archive launches download and extract ~70 MB and may wait on an install lock.
+@@ -1115,6 +1115,16 @@ export function buildRemoteLogTailScript(stateKey: string): string {
+   });
+ }
+ 
++// Shells known to take `-l -c` with a POSIX-style `exec` read their own login
++// profiles first; any other shell (csh, pwsh, ...) keeps the plain `sh -l` launch.
++export const remoteLoginShellArgs = (args = "") => [
++  "sh",
++  "-c",
++  shellSingleQuote(
++    `case "\${SHELL##*/}" in bash|zsh|ksh|fish|nu) exec "$SHELL" -l -c "exec sh -s${args ? ` -- ${args}` : ""}" ;; *) exec sh -l -s${args ? ` -- ${args}` : ""} ;; esac`,
++  ),
++];
++
+ export function targetConnectionKey(target: DesktopSshEnvironmentTarget): string {
+   return `${target.alias}\u0000${target.hostname}\u0000${target.username ?? ""}\u0000${target.port ?? ""}`;
+ }
+diff --git a/packages/ssh/src/tunnel.ts b/packages/ssh/src/tunnel.ts
+index 1c97d03605524a3c7b7d683faec6e0f666b83653..a184cede0e35d56c202a2ff716aeb4b806726403 100644
+--- a/packages/ssh/src/tunnel.ts
++++ b/packages/ssh/src/tunnel.ts
+@@ -31,7 +31,6 @@ import {
+   resolveSshCommand,
+   resolveSshTarget,
+   runSshCommand,
+-  shellSingleQuote,
+   sshTargetLogFields,
+   targetConnectionKey,
+ } from "./command.ts";
+@@ -55,6 +54,7 @@ import {
+   REMOTE_ARCHIVE_LAUNCH_TIMEOUT_MS,
+   REMOTE_LAUNCH_BASE_TIMEOUT_MS,
+   REMOTE_LAUNCH_TIMEOUT_MS,
++  remoteLoginShellArgs,
+   type RemoteT3RunnerOptions,
+   validLauncherId,
+ } from "./remoteScripts.ts";
+@@ -157,16 +157,6 @@ function normalizeSshErrorMessage(stderr: string, fallbackMessage: string): stri
+   return cleaned.length > 0 ? cleaned : fallbackMessage;
+ }
+ 
+-// Shells known to take `-l -c` with a POSIX-style `exec` read their own login
+-// profiles first; any other shell (csh, pwsh, ...) keeps the plain `sh -l` launch.
+-const remoteLoginShellArgs = (args = "") => [
+-  "sh",
+-  "-c",
+-  shellSingleQuote(
+-    `case "\${SHELL##*/}" in bash|zsh|ksh|fish|nu) exec "$SHELL" -l -c "exec sh -s${args ? ` -- ${args}` : ""}" ;; *) exec sh -l -s${args ? ` -- ${args}` : ""} ;; esac`,
+-  ),
+-];
+-
+ export const launchOrReuseRemoteServer = Effect.fn("ssh/tunnel.launchOrReuseRemoteServer")(
+   function* (
+     target: DesktopSshEnvironmentTarget,

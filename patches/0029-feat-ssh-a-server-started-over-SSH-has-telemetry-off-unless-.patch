@@ -1,0 +1,68 @@
+diff --git a/packages/ssh/src/tunnel.test.ts b/packages/ssh/src/tunnel.test.ts
+index acb4ea47fc025f1684199fd9ee853b1ac7508c74..590f1b763e132724b0c8bd3dc817319aa825923e 100644
+--- a/packages/ssh/src/tunnel.test.ts
++++ b/packages/ssh/src/tunnel.test.ts
+@@ -1739,6 +1739,7 @@ const canBind = (port) =>
+           origin: "http://127.0.0.1:" + port,
+           startedAt: new Date().toISOString(),
+           serverVersion: version,
++          telemetry: process.env.T3CODE_TELEMETRY_ENABLED,
+         }),
+       );
+     });
+@@ -1848,19 +1849,38 @@ const canBind = (port) =>
+           }),
+         ),
+       );
+-      const connect = (archiveVersion: string) =>
++      // `profile` stands in for what the host's login shell exports before the script runs.
++      const connect = (archiveVersion: string, profile = "") =>
+         Effect.gen(function* () {
+           const launch = `${root}/launch-${archiveVersion}.sh`;
+-          yield* fs.writeFileString(launch, SshTunnel.buildRemoteLaunchScript({ archiveVersion }));
++          yield* fs.writeFileString(
++            launch,
++            profile + SshTunnel.buildRemoteLaunchScript({ archiveVersion }),
++          );
+           const result = yield* runScript(home, [launch, "test-state"]);
+           assert.equal(result.exitCode, 0, result.stderr);
+           const pid = yield* readManagedPid;
+           launchedPids.add(pid);
+           return pid;
+         });
+-      return { connect, readManagedPid, readServerVersion };
++      const readServerTelemetry = fs
++        .readFileString(`${home}/.t3/userdata/server-runtime.json`)
++        .pipe(Effect.map((raw) => (JSON.parse(raw) as { telemetry?: string }).telemetry));
++      return { connect, readManagedPid, readServerVersion, readServerTelemetry };
+     });
+ 
++  it.live.skipIf(windowsHost)("starts the server with telemetry off unless the host opted in", () =>
++    Effect.gen(function* () {
++      const unset = yield* prepareLaunch(["0.1.6"]);
++      yield* unset.connect("0.1.6");
++      assert.equal(yield* unset.readServerTelemetry, "false");
++
++      const optedIn = yield* prepareLaunch(["0.1.6"]);
++      yield* optedIn.connect("0.1.6", "export T3CODE_TELEMETRY_ENABLED=true\n");
++      assert.equal(yield* optedIn.readServerTelemetry, "true");
++    }).pipe(Effect.provide(NodeServices.layer)),
++  );
++
+   it.live.skipIf(windowsHost)(
+     "a reconnect from an older client keeps a newer managed server running",
+     () =>
+diff --git a/packages/ssh/src/tunnel.ts b/packages/ssh/src/tunnel.ts
+index 8a50f7c45c8921950ff5201699f498cdc709bc78..98ea92715588108cf70ecf5ad7b143999852399f 100644
+--- a/packages/ssh/src/tunnel.ts
++++ b/packages/ssh/src/tunnel.ts
+@@ -1028,7 +1028,8 @@ if [ -z "$REMOTE_PORT" ]; then
+   # earlier launch can still hold the old log open and keep writing to it.
+   rm -f "$LOG_FILE"
+   (umask 077 && : >"$LOG_FILE")
+-  nohup env T3CODE_NO_BROWSER=1 "$RUNNER_FILE" serve --host 127.0.0.1 --port "$REMOTE_PORT" --base-dir "$DEFAULT_SERVER_HOME" >>"$LOG_FILE" 2>&1 < /dev/null &
++  # The runner may fetch upstream's own build, which reports usage unless told not to.
++  nohup env T3CODE_NO_BROWSER=1 T3CODE_TELEMETRY_ENABLED="\${T3CODE_TELEMETRY_ENABLED:-false}" "$RUNNER_FILE" serve --host 127.0.0.1 --port "$REMOTE_PORT" --base-dir "$DEFAULT_SERVER_HOME" >>"$LOG_FILE" 2>&1 < /dev/null &
+   REMOTE_PID="$!"
+   printf '%s\\n' "$REMOTE_PID" >"$PID_FILE"
+   printf '%s\\n' "$REMOTE_PORT" >"$PORT_FILE"

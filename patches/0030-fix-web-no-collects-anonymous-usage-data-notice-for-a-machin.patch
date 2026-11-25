@@ -1,0 +1,84 @@
+diff --git a/apps/web/src/components/onboarding/WelcomePage.tsx b/apps/web/src/components/onboarding/WelcomePage.tsx
+index 5c1b4218117fc538b60ea0d9a37f08220f6212f9..814304a7814735034ffc869445b88d97dc3f5d99 100644
+--- a/apps/web/src/components/onboarding/WelcomePage.tsx
++++ b/apps/web/src/components/onboarding/WelcomePage.tsx
+@@ -85,7 +85,11 @@ import { newProjectId, randomUUID } from "../../lib/utils";
+ import { agentSessionImport } from "../../state/agentSessions";
+ import { readProjects, useProjects, waitForProject } from "../../state/entities";
+ import { useEnvironments, usePrimaryEnvironmentId } from "../../state/environments";
+-import { managedTelemetryOffMessage, useManagedPolicy } from "../../state/managedPolicy";
++import {
++  managedTelemetryOffMessage,
++  useManagedPolicy,
++  useUsageDataOff,
++} from "../../state/managedPolicy";
+ import { useProjectScans } from "../../onboarding/useProjectScans";
+ import { projectEnvironment } from "../../state/projects";
+ import { serverEnvironment } from "../../state/server";
+@@ -346,6 +350,8 @@ export function WelcomePage({
+ function TelemetryNotice({ environmentId }: { readonly environmentId: EnvironmentId }) {
+   const messages = useMessages();
+   const telemetryOff = managedTelemetryOffMessage(useManagedPolicy(environmentId), messages);
++  const usageDataOff = useUsageDataOff(environmentId);
++  if (telemetryOff === undefined && usageDataOff) return null;
+   return (
+     <p className="mt-auto pt-12 text-2xs leading-relaxed text-muted-foreground/70">
+       {telemetryOff === undefined ? (
+diff --git a/apps/web/src/components/settings/SettingsPanels.tsx b/apps/web/src/components/settings/SettingsPanels.tsx
+index 10d4e2c6fab5d0cc55332e0a361a4faa789bee32..45cc7bccc6728e7201169db076b1000805ee1a62 100644
+--- a/apps/web/src/components/settings/SettingsPanels.tsx
++++ b/apps/web/src/components/settings/SettingsPanels.tsx
+@@ -72,7 +72,11 @@ import { ProjectDefaultsSettings } from "./ProjectDefaultsSettings";
+ import { ThreadTitleInstructionsSettings } from "./ThreadTitleInstructionsSettings";
+ import { SnoozePresetsRow } from "./SnoozePresetsSettings";
+ import { useDesktopUpdateState } from "../../state/desktopUpdate";
+-import { managedTelemetryOffMessage, usePrimaryManagedPolicy } from "../../state/managedPolicy";
++import {
++  managedTelemetryOffMessage,
++  usePrimaryManagedPolicy,
++  useUsageDataOff,
++} from "../../state/managedPolicy";
+ import {
+   getTextGenerationModelOptionsByInstance,
+   resolveAppModelSelectionState,
+@@ -2531,6 +2535,7 @@ export function AboutSettingsPanel() {
+   // The Welcome page sets up this computer, so it needs one.
+   const primaryEnvironmentId = usePrimaryEnvironmentId();
+   const telemetryOff = managedTelemetryOffMessage(primaryPolicy, messages);
++  const usageDataOff = useUsageDataOff(primaryEnvironmentId);
+   return (
+     <SettingsPageContainer>
+       <SettingsSection id="about" title={gt("App")}>
+@@ -2586,7 +2591,8 @@ export function AboutSettingsPanel() {
+           {...setting("privacy-policy")}
+           description={
+             telemetryOff === undefined
+-              ? gt("How we handle your data, including the anonymous usage data T3 Code collects.")
++              ? !usageDataOff &&
++                gt("How we handle your data, including the anonymous usage data T3 Code collects.")
+               : gt("How we handle your data. {telemetryOff}", { telemetryOff })
+           }
+           control={
+diff --git a/apps/web/src/state/managedPolicy.ts b/apps/web/src/state/managedPolicy.ts
+index 707de7702238312a5fcfde3ccb6bef8eb71b9fae..099be1fa5a2305d94958e46b44ef13b807459eca 100644
+--- a/apps/web/src/state/managedPolicy.ts
++++ b/apps/web/src/state/managedPolicy.ts
+@@ -14,6 +14,18 @@ export function useManagedPolicy(
+   return environmentId == null ? undefined : serverConfigs.get(environmentId)?.managedPolicy;
+ }
+ 
++/**
++ * Whether this machine's server says it sends no usage data, as a Catgirl Code server does unless
++ * asked. The relay tracing flag is the one answer the server gives, and it follows the same switches.
++ */
++export function useUsageDataOff(environmentId: EnvironmentId | null | undefined): boolean {
++  const serverConfigs = useServerConfigs();
++  return (
++    environmentId != null &&
++    serverConfigs.get(environmentId)?.observability.relayTracingAllowed === false
++  );
++}
++
+ export function usePrimaryManagedPolicy(): ManagedPolicySummary | undefined {
+   return useManagedPolicy(usePrimaryEnvironmentId());
+ }

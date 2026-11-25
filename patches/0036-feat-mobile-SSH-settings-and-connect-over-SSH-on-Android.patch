@@ -1,0 +1,578 @@
+diff --git a/apps/mobile/src/Stack.tsx b/apps/mobile/src/Stack.tsx
+index 38eba55e812ed3b9463183acfb7c81e1181a69a0..0e8ebc9b9ad071d231bb4e880d776b825b8b756a 100644
+--- a/apps/mobile/src/Stack.tsx
++++ b/apps/mobile/src/Stack.tsx
+@@ -143,6 +143,7 @@ import { WorkflowRunRouteScreen } from "./features/workflows/WorkflowRunRouteScr
+ import { WorkflowStepSheet } from "./features/workflows/WorkflowStepSheet";
+ import { SettingsAboutRouteScreen } from "./features/settings/SettingsAboutRouteScreen";
+ import { SettingsNotificationsRouteScreen } from "./features/settings/SettingsNotificationsRouteScreen";
++import { SettingsSshRouteScreen } from "./features/settings/SettingsSshRouteScreen";
+ import { SettingsRouteScreen } from "./features/settings/SettingsRouteScreen";
+ import { SettingsLabsRouteScreen } from "./features/settings/ThreadSettingsSections";
+ import { SettingsEnvironmentFilterProvider } from "./features/settings/settings-environment-filter";
+@@ -181,6 +182,7 @@ const ROUTE_TITLES: Readonly<Record<string, string>> = {
+   SettingsProviderAccounts: msg("Providers"),
+   SettingsEnvironmentMaintenance: msg("Maintenance"),
+   SettingsNotifications: msg("Notifications"),
++  SettingsSsh: "SSH",
+   SettingsThreads: msg("Threads"),
+   SettingsAbout: msg("About"),
+   SettingsEnvironmentNew: msg("Add Environment"),
+@@ -300,6 +302,11 @@ const SETTINGS_SCREENS = {
+     linking: "settings/notifications",
+     options: settingsPage(),
+   }),
++  SettingsSsh: createNativeStackScreen({
++    screen: SettingsSshRouteScreen,
++    linking: "settings/ssh",
++    options: settingsPage(),
++  }),
+   SettingsThreads: createNativeStackScreen({
+     screen: SettingsThreadsRouteScreen,
+     linking: "settings/thread-preferences",
+diff --git a/apps/mobile/src/connection/ssh/gateway.ts b/apps/mobile/src/connection/ssh/gateway.ts
+index 1159bd7f8de74db9c9a42c3a8f13d4e37c91d278..39602070f8ddbe5dc127e21d4cd81076bc292855 100644
+--- a/apps/mobile/src/connection/ssh/gateway.ts
++++ b/apps/mobile/src/connection/ssh/gateway.ts
+@@ -29,7 +29,7 @@ import {
+ import * as Effect from "effect/Effect";
+ import { HttpClient } from "effect/http";
+ 
+-import { type SshNative, sshErrorCode } from "./native";
++import { type SshNative, sshErrorCode, sshFailureMessage } from "./native";
+ import { parseSshConfig, resolveSshHost } from "./sshConfig";
+ 
+ /**
+@@ -274,14 +274,13 @@ function nativeError(cause: unknown) {
+     case "ERR_SSH_AUTH":
+       return new ConnectionBlockedError({
+         reason: "authentication",
+-        detail:
+-          "The host did not accept this device's SSH key. Add the key from Settings > SSH to its authorized_keys.",
++        detail: sshFailureMessage(cause),
+         hop: "tunnel",
+       });
+     case "ERR_SSH_NO_KEY":
+       return new ConnectionBlockedError({
+         reason: "configuration",
+-        detail: "Create an SSH key in Settings > SSH first.",
++        detail: sshFailureMessage(cause),
+         hop: "device",
+       });
+     case "ERR_SSH_UNREACHABLE":
+diff --git a/apps/mobile/src/connection/ssh/native.ts b/apps/mobile/src/connection/ssh/native.ts
+index 3d8b3451a2804197b18ebc457501ece9e9f7c7d8..78e96fe8bebaaff479bc87f4f3706e9205ee90eb 100644
+--- a/apps/mobile/src/connection/ssh/native.ts
++++ b/apps/mobile/src/connection/ssh/native.ts
+@@ -74,3 +74,15 @@ export function sshErrorCode(cause: unknown): string | null {
+     ? cause.code
+     : null;
+ }
++
++/** What a person can act on, for the errors the native module names. */
++export function sshFailureMessage(cause: unknown): string {
++  switch (sshErrorCode(cause)) {
++    case "ERR_SSH_AUTH":
++      return "The host did not accept this device's SSH key. Add the key from Settings > SSH to its authorized_keys.";
++    case "ERR_SSH_NO_KEY":
++      return "Create an SSH key in Settings > SSH first.";
++    default:
++      return cause instanceof Error ? cause.message : String(cause);
++  }
++}
+diff --git a/apps/mobile/src/features/connection/ConnectionsNewRouteScreen.tsx b/apps/mobile/src/features/connection/ConnectionsNewRouteScreen.tsx
+index 67a2935174fdd4110934a4258bb75cb8e19bb8cb..d3597a28aca1b58194c0e0970acffd00aaa87108 100644
+--- a/apps/mobile/src/features/connection/ConnectionsNewRouteScreen.tsx
++++ b/apps/mobile/src/features/connection/ConnectionsNewRouteScreen.tsx
+@@ -35,6 +35,7 @@ import { splitEnvironmentSections } from "./environmentSections";
+ import { leaveSettingsPage } from "../settings/settings-navigation";
+ import { workspaceHasColumns } from "../layout/workspace/workspace-selection-store";
+ import { m } from "../../i18n/messages";
++import { SshEnvironmentSection } from "./SshEnvironmentSection";
+ 
+ type ConnectionsNewRouteParams = {
+   readonly mode?: string;
+@@ -183,14 +184,16 @@ function PairingForm({
+         ? Haptics.NotificationFeedbackType.Success
+         : Haptics.NotificationFeedbackType.Error,
+     );
+-    if (outcome.ok) {
+-      // Replacing with Home would nest it inside any sheet below; return to the opener.
+-      if (!navigation.canGoBack()) {
+-        navigation.dispatch(StackActions.replace("Home"));
+-      } else {
+-        // Added from the Settings list, the new environment shows on Environments.
+-        leaveSettingsPage(navigation, workspaceHasColumns(), "SettingsEnvironments");
+-      }
++    if (outcome.ok) close();
++  };
++
++  const close = () => {
++    // Replacing with Home would nest it inside any sheet below; return to the opener.
++    if (!navigation.canGoBack()) {
++      navigation.dispatch(StackActions.replace("Home"));
++    } else {
++      // Added from the Settings list, the new environment shows on Environments.
++      leaveSettingsPage(navigation, workspaceHasColumns(), "SettingsEnvironments");
+     }
+   };
+ 
+@@ -286,6 +289,8 @@ function PairingForm({
+             </Text>
+           </View>
+ 
++          <SshEnvironmentSection onConnected={close} />
++
+           {hasCloudPublicConfig() ? <T3ConnectSection /> : null}
+         </View>
+       </ScrollView>
+diff --git a/apps/mobile/src/features/connection/SshEnvironmentSection.tsx b/apps/mobile/src/features/connection/SshEnvironmentSection.tsx
+new file mode 100644
+index 0000000000000000000000000000000000000000..235619c7198a6504350823fa121f12f158943062
+--- /dev/null
++++ b/apps/mobile/src/features/connection/SshEnvironmentSection.tsx
+@@ -0,0 +1,135 @@
++import { useFocusEffect, useNavigation } from "@react-navigation/native";
++import * as Cause from "effect/Cause";
++import { AsyncResult } from "effect/reactivity";
++import * as Haptics from "expo-haptics";
++import { useCallback, useState } from "react";
++import { View } from "react-native";
++
++import { AppText as Text } from "../../components/ui/AppText";
++import * as Dialog from "../../components/ui/Dialog";
++import { ListActionRow } from "../../components/ui/ListActionRow";
++import { connectSshEnvironment } from "../../connection/onboarding";
++import { reviewHostKeys } from "../../connection/ssh/hostKeys";
++import {
++  type SshHostKeyRejection,
++  type SshNative,
++  sshFailureMessage,
++  sshNative,
++} from "../../connection/ssh/native";
++import {
++  parseSshConfig,
++  resolveSshHost,
++  type SshConfig,
++  type SshConfigHost,
++} from "../../connection/ssh/sshConfig";
++import { useAtomCommand } from "../../state/use-atom-command";
++
++/** Hosts from the app's SSH config, on platforms with the SSH module. */
++export function SshEnvironmentSection(props: { readonly onConnected: () => void }) {
++  return sshNative === null ? null : (
++    <SshHosts native={sshNative} onConnected={props.onConnected} />
++  );
++}
++
++function SshHosts(props: { readonly native: SshNative; readonly onConnected: () => void }) {
++  const { native, onConnected } = props;
++  const navigation = useNavigation();
++  const connectSsh = useAtomCommand(connectSshEnvironment, { reportFailure: false });
++  const [config, setConfig] = useState<SshConfig>({ hosts: [], problems: [] });
++  const [hasKey, setHasKey] = useState(false);
++  const [connecting, setConnecting] = useState<string | null>(null);
++
++  // Settings > SSH may have changed the config or key while this screen was underneath.
++  useFocusEffect(
++    useCallback(() => {
++      let live = true;
++      void Promise.all([native.readConfig(), native.getPublicKey()]).then(([text, key]) => {
++        if (!live) return;
++        setConfig(parseSshConfig(text));
++        setHasKey(key !== null);
++      });
++      return () => {
++        live = false;
++      };
++    }, [native]),
++  );
++
++  const openSettings = () => navigation.navigate("SettingsSsh");
++
++  const connect = async (alias: string) => {
++    if (!hasKey) {
++      Dialog.alert("Create an SSH key first", "Then add its public key to the host.", [
++        { text: "Cancel", style: "cancel" },
++        { text: "Open SSH settings", onPress: openSettings },
++      ]);
++      return;
++    }
++    setConnecting(alias);
++    try {
++      const resolved = resolveSshHost(config, alias);
++      if (!(await reviewHostKeys(native, resolved.hops, confirmHostKey))) return;
++      const result = await connectSsh({ target: resolved.target });
++      void Haptics.notificationAsync(
++        AsyncResult.isSuccess(result)
++          ? Haptics.NotificationFeedbackType.Success
++          : Haptics.NotificationFeedbackType.Error,
++      );
++      if (AsyncResult.isSuccess(result)) {
++        onConnected();
++      } else {
++        Dialog.alert("Could not connect", sshFailureMessage(Cause.squash(result.cause)));
++      }
++    } catch (error) {
++      void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error);
++      Dialog.alert("Could not connect", sshFailureMessage(error));
++    } finally {
++      setConnecting(null);
++    }
++  };
++
++  return (
++    <View collapsable={false} className="gap-2">
++      <Text className="px-4 text-sm font-t3-medium text-foreground-muted">Or connect over SSH</Text>
++      <View className="overflow-hidden rounded-[26px] border-continuous bg-grouped-card">
++        {config.hosts.map((host) => (
++          <ListActionRow
++            key={host.alias}
++            icon="terminal"
++            label={host.alias}
++            description={describeHost(host)}
++            loading={connecting === host.alias}
++            disabled={connecting !== null}
++            onPress={() => void connect(host.alias)}
++          />
++        ))}
++        <ListActionRow
++          icon="slider.horizontal.3"
++          label={config.hosts.length === 0 ? "Set up SSH" : "SSH key and hosts"}
++          disabled={connecting !== null}
++          onPress={openSettings}
++        />
++      </View>
++      <Text className="px-4 text-sm leading-normal text-foreground-muted">
++        Starts T3 Code on the host if needed, using this device's own SSH key.
++      </Text>
++    </View>
++  );
++}
++
++function describeHost(host: SshConfigHost): string {
++  const port = host.port === null ? "" : `:${host.port}`;
++  const via = host.proxyJump?.length ? ` via ${host.proxyJump.join(", ")}` : "";
++  return `${host.user ?? "?"}@${host.hostname ?? host.alias}${port}${via}`;
++}
++
++function confirmHostKey(rejection: SshHostKeyRejection): Promise<boolean> {
++  return new Promise((resolve) =>
++    Dialog.confirm({
++      title: `Trust ${rejection.knownHostsName}?`,
++      message: `This is the first connection to this host. Its ${rejection.keyType} key fingerprint is\n\n${rejection.fingerprint}\n\nCheck it against ssh-keygen -lf on the host before trusting it.`,
++      confirmText: "Trust",
++      onConfirm: () => resolve(true),
++      onCancel: () => resolve(false),
++    }),
++  );
++}
+diff --git a/apps/mobile/src/features/settings/SettingsRouteScreen.tsx b/apps/mobile/src/features/settings/SettingsRouteScreen.tsx
+index 2a0edba8a3cead7921dfad513829a6573ae60952..14a02ba60d90a595408a58ca642913ed2d0e3bac 100644
+--- a/apps/mobile/src/features/settings/SettingsRouteScreen.tsx
++++ b/apps/mobile/src/features/settings/SettingsRouteScreen.tsx
+@@ -25,6 +25,7 @@ import { useSafeAreaInsets } from "react-native-safe-area-context";
+ import { hasCloudPublicConfig } from "../cloud/publicConfig";
+ import { useAdaptiveWorkspaceLayout } from "../layout/adaptive-workspace-context";
+ import { useSavedRemoteConnections } from "../../state/use-remote-environment-registry";
++import { sshNative } from "../../connection/ssh/native";
+ import { SettingsRow } from "./components/SettingsRow";
+ import { SettingsSection, SettingsSidebarContext } from "./components/SettingsSection";
+ import { SettingsScreen } from "./components/SettingsScreen";
+@@ -139,6 +140,7 @@ function ConfiguredSettingsRouteScreen() {
+           label: gt("Notifications"),
+           target: "SettingsNotifications",
+         },
++        ...sshRows,
+       ]}
+     />
+   );
+@@ -149,11 +151,19 @@ function LocalSettingsRouteScreen() {
+   const { savedConnectionsById } = useSavedRemoteConnections();
+   return (
+     <SettingsList
+-      connections={[environmentsRow(gt("Environments"), Object.keys(savedConnectionsById).length)]}
++      connections={[
++        environmentsRow(gt("Environments"), Object.keys(savedConnectionsById).length),
++        ...sshRows,
++      ]}
+     />
+   );
+ }
+ 
++const sshRows: readonly SettingsListRow[] =
++  sshNative === null
++    ? []
++    : [{ id: "SettingsSsh", icon: "terminal", label: "SSH", target: "SettingsSsh" }];
++
+ function environmentsRow(label: string, count: number): SettingsListRow {
+   return {
+     id: "SettingsEnvironments",
+diff --git a/apps/mobile/src/features/settings/SettingsSshRouteScreen.tsx b/apps/mobile/src/features/settings/SettingsSshRouteScreen.tsx
+new file mode 100644
+index 0000000000000000000000000000000000000000..91006763d6de8ce02db301aa71c8d14c44870f1d
+--- /dev/null
++++ b/apps/mobile/src/features/settings/SettingsSshRouteScreen.tsx
+@@ -0,0 +1,219 @@
++import * as Clipboard from "expo-clipboard";
++import * as Haptics from "expo-haptics";
++import { useCallback, useEffect, useMemo, useState } from "react";
++import { Share, View } from "react-native";
++import { useSafeAreaInsets } from "react-native-safe-area-context";
++
++import { AppText as Text, AppTextInput } from "../../components/ui/AppText";
++import * as Dialog from "../../components/ui/Dialog";
++import { ListActionRow } from "../../components/ui/ListActionRow";
++import { ScreenScrollView as ScrollView } from "../../components/ui/ScreenScrollView";
++import {
++  type SshKnownHost,
++  type SshNative,
++  type SshPublicKey,
++  sshFailureMessage,
++  sshNative,
++} from "../../connection/ssh/native";
++import { parseSshConfig } from "../../connection/ssh/sshConfig";
++import { SettingsSection } from "./components/SettingsSection";
++import { SettingsScreen } from "./components/SettingsScreen";
++
++const KEY_COMMENT = "t3code-android";
++const CONFIG_PLACEHOLDER = "Host my-server\n  HostName server.example.com\n  User me";
++
++export function SettingsSshRouteScreen() {
++  const insets = useSafeAreaInsets();
++  return (
++    <SettingsScreen title="SSH">
++      <ScrollView
++        contentInsetAdjustmentBehavior="automatic"
++        keyboardShouldPersistTaps="handled"
++        showsVerticalScrollIndicator={false}
++        className="flex-1"
++        contentContainerClassName="gap-6 px-5 pt-4"
++        contentContainerStyle={{ paddingBottom: Math.max(insets.bottom, 18) + 18 }}
++      >
++        {sshNative === null ? (
++          <Text className="px-4 text-foreground-muted">SSH environments need the Android app.</Text>
++        ) : (
++          <SshSettings native={sshNative} />
++        )}
++      </ScrollView>
++    </SettingsScreen>
++  );
++}
++
++function SshSettings({ native }: { readonly native: SshNative }) {
++  const [key, setKey] = useState<SshPublicKey | null>(null);
++  const [savedConfig, setSavedConfig] = useState("");
++  const [config, setConfig] = useState("");
++  const [knownHosts, setKnownHosts] = useState<ReadonlyArray<SshKnownHost>>([]);
++  const [busy, setBusy] = useState<"key" | "config" | null>(null);
++  const problems = useMemo(() => parseSshConfig(config).problems, [config]);
++
++  const run = useCallback(async (kind: "key" | "config" | null, action: () => Promise<void>) => {
++    setBusy(kind);
++    try {
++      await action();
++    } catch (error) {
++      Dialog.alert("SSH", sshFailureMessage(error));
++    } finally {
++      setBusy(null);
++    }
++  }, []);
++
++  useEffect(() => {
++    let live = true;
++    Promise.all([native.getPublicKey(), native.readConfig(), native.listKnownHosts()]).then(
++      ([nextKey, nextConfig, nextHosts]) => {
++        if (!live) return;
++        setKey(nextKey);
++        setSavedConfig(nextConfig);
++        setConfig(nextConfig);
++        setKnownHosts(nextHosts);
++      },
++      (error: unknown) => Dialog.alert("SSH", sshFailureMessage(error)),
++    );
++    return () => {
++      live = false;
++    };
++  }, [native]);
++
++  const createKey = () =>
++    void run("key", async () => {
++      setKey(await native.createKey(KEY_COMMENT));
++    });
++
++  const copyKey = (line: string) =>
++    void run(null, async () => {
++      await Clipboard.setStringAsync(line);
++      void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
++    });
++
++  const saveConfig = () =>
++    void run("config", async () => {
++      await native.writeConfig(config);
++      setSavedConfig(config);
++    });
++
++  const forgetHost = (host: SshKnownHost) =>
++    Dialog.confirm({
++      title: `Remove ${host.names.join(", ")}?`,
++      message: "You will be asked to check its key again on the next connection.",
++      confirmText: "Remove",
++      destructive: true,
++      onConfirm: () =>
++        void run(null, async () => {
++          await native.forgetHostKey(host.line);
++          setKnownHosts(await native.listKnownHosts());
++        }),
++    });
++
++  return (
++    <>
++      <SettingsSection
++        title="This device's key"
++        footer={
++          key === null
++            ? "An ed25519 key that stays on this device and is never backed up."
++            : "Add this line to ~/.ssh/authorized_keys on each host. It is the only key the app uses."
++        }
++      >
++        {key === null ? (
++          <ListActionRow
++            icon="plus"
++            label="Create SSH key"
++            loading={busy === "key"}
++            onPress={createKey}
++          />
++        ) : (
++          <>
++            <View collapsable={false} className="gap-1 px-4 py-3">
++              <Text selectable className="font-mono text-xs text-foreground">
++                {key.line}
++              </Text>
++              <Text className="text-xs text-foreground-muted">{key.fingerprint}</Text>
++            </View>
++            <View className="ml-4 border-t border-border-subtle" />
++            <ListActionRow
++              icon="doc.on.doc"
++              label="Copy public key"
++              onPress={() => copyKey(key.line)}
++            />
++            <ListActionRow
++              icon="square.and.arrow.up"
++              label="Share public key"
++              onPress={() => void Share.share({ message: key.line })}
++            />
++            <ListActionRow
++              icon="arrow.clockwise"
++              label="Replace key"
++              tone="danger"
++              loading={busy === "key"}
++              onPress={() =>
++                Dialog.confirm({
++                  title: "Replace this device's SSH key?",
++                  message: "Hosts stop accepting this device until you add the new key to them.",
++                  confirmText: "Replace",
++                  destructive: true,
++                  onConfirm: createKey,
++                })
++              }
++            />
++          </>
++        )}
++      </SettingsSection>
++
++      <SettingsSection
++        title="SSH config"
++        footer="Uses Host, HostName, User, Port, ProxyJump and HostKeyAlias, as in ~/.ssh/config."
++      >
++        <AppTextInput
++          accessibilityLabel="SSH config"
++          multiline
++          autoCapitalize="none"
++          autoCorrect={false}
++          spellCheck={false}
++          textAlignVertical="top"
++          placeholder={CONFIG_PLACEHOLDER}
++          value={config}
++          onChangeText={setConfig}
++          className="min-h-40 rounded-none border-0 bg-transparent font-mono text-sm"
++        />
++        {problems.map((problem) => (
++          <Text key={problem} className="px-4 pb-2 text-xs text-danger-foreground">
++            {problem}
++          </Text>
++        ))}
++        <View className="ml-4 border-t border-border-subtle" />
++        <ListActionRow
++          icon="checkmark.circle"
++          label="Save config"
++          disabled={config === savedConfig}
++          loading={busy === "config"}
++          onPress={saveConfig}
++        />
++      </SettingsSection>
++
++      <SettingsSection
++        title="Trusted host keys"
++        footer="A host's key is added when you confirm it while adding an environment."
++      >
++        {knownHosts.length === 0 ? (
++          <ListActionRow label="None yet" disabled onPress={() => undefined} />
++        ) : (
++          knownHosts.map((host) => (
++            <ListActionRow
++              key={host.line}
++              icon="trash"
++              label={host.names.join(", ")}
++              description={`${host.keyType} ${host.fingerprint}`}
++              onPress={() => forgetHost(host)}
++            />
++          ))
++        )}
++      </SettingsSection>
++    </>
++  );
++}
+diff --git a/apps/mobile/src/features/settings/components/settings-page-targets.ts b/apps/mobile/src/features/settings/components/settings-page-targets.ts
+index a92922a66d1e3525b89f0e68de7da337f6770ce2..71b26af356060c85ae77dcf0c0806b3abe2d0ce2 100644
+--- a/apps/mobile/src/features/settings/components/settings-page-targets.ts
++++ b/apps/mobile/src/features/settings/components/settings-page-targets.ts
+@@ -2,6 +2,7 @@
+ export const SETTINGS_PAGE_TARGETS = [
+   "SettingsEnvironments",
+   "SettingsNotifications",
++  "SettingsSsh",
+   "SettingsThreads",
+   "SettingsAbout",
+   "SettingsArchive",
+diff --git a/apps/mobile/src/features/settings/settings-search.ts b/apps/mobile/src/features/settings/settings-search.ts
+index 6814475323db05fdec303f3b0c313dc731bf2bce..115d6e72d90e8633320282fa028d7c13086b620e 100644
+--- a/apps/mobile/src/features/settings/settings-search.ts
++++ b/apps/mobile/src/features/settings/settings-search.ts
+@@ -28,6 +28,13 @@ const SETTINGS_SEARCH_TERMS = {
+     msg("live activity", { $context: "settings search keyword" }),
+     msg("agent activity", { $context: "settings search keyword" }),
+   ],
++  SettingsSsh: [
++    msg("ssh key", { $context: "settings search keyword" }),
++    msg("ssh config", { $context: "settings search keyword" }),
++    msg("known hosts", { $context: "settings search keyword" }),
++    "proxyjump",
++    "authorized_keys",
++  ],
+   SettingsAppearance: [
+     msg("theme", { $context: "settings search keyword" }),
+     msg("dark mode", { $context: "settings search keyword" }),
+diff --git a/knip.jsonc b/knip.jsonc
+index 6f2a40fe94473b591ff74d89753c3f7e3ba46126..05207a91997ca54e42d80cc08494c75b260fa0bd 100644
+--- a/knip.jsonc
++++ b/knip.jsonc
+@@ -124,6 +124,8 @@
+         "fingerprint.config.js",
+         "plugins/*.cjs",
+         "scripts/generate-device-stream.mts",
++        // Run by hand to feed the native SSH module's end-to-end test.
++        "modules/t3-ssh/e2e/write-remote-scripts.ts",
+         "src/features/devices/device-stream.browser.ts!",
+         "src/features/browser/preview-stream.browser.ts!",
+       ],

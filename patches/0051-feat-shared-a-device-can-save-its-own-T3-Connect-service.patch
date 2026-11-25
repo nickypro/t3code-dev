@@ -1,0 +1,637 @@
+diff --git a/packages/contracts/src/connectService.ts b/packages/contracts/src/connectService.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..9b74bf83c06e8fba1dc57af36119b4d3bffc3da6
+--- /dev/null
++++ b/packages/contracts/src/connectService.ts
+@@ -0,0 +1,34 @@
++import * as Schema from "effect/Schema";
++
++/** Where a relay publishes the public sign-in values its clients need. */
++export const CONNECT_SERVICE_DISCOVERY_PATH = "/.well-known/t3-connect.json";
++
++export const CONNECT_SERVICE_DISCOVERY_VERSION = 1;
++
++/**
++ * Version 1 of the document. New optional fields keep the version; a change an old client
++ * cannot read bumps it, and that client then asks for the values by hand.
++ */
++export const ConnectServiceDiscoveryDocument = Schema.Struct({
++  version: Schema.Number,
++  relayUrl: Schema.String,
++  clerk: Schema.Struct({
++    publishableKey: Schema.String,
++    jwtTemplate: Schema.String,
++    cliOAuthClientId: Schema.optionalKey(Schema.NullOr(Schema.String)),
++  }),
++});
++export type ConnectServiceDiscoveryDocument = typeof ConnectServiceDiscoveryDocument.Type;
++
++export const ConnectServiceSettingsSource = Schema.Literals(["discovered", "manual"]);
++export type ConnectServiceSettingsSource = typeof ConnectServiceSettingsSource.Type;
++
++/** The Connect service a device saved in place of the one its build ships with. */
++export const ConnectServiceSettings = Schema.Struct({
++  relayUrl: Schema.String,
++  clerkPublishableKey: Schema.String,
++  clerkJwtTemplate: Schema.String,
++  clerkCliOAuthClientId: Schema.NullOr(Schema.String),
++  source: ConnectServiceSettingsSource,
++});
++export type ConnectServiceSettings = typeof ConnectServiceSettings.Type;
+diff --git a/packages/contracts/src/index.ts b/packages/contracts/src/index.ts
+index 58863aaebd5e5ff780602231e6c996695899d643..a25702f494d2e610f96ad5ded3b6cbdb95cf5959 100644
+--- a/packages/contracts/src/index.ts
++++ b/packages/contracts/src/index.ts
+@@ -8,6 +8,7 @@ export * from "./auth.ts";
+ export * from "./environment.ts";
+ export * from "./environmentHttp.ts";
+ export * from "./relayClient.ts";
++export * from "./connectService.ts";
+ export * from "./desktopBootstrap.ts";
+ export * from "./desktopBrowser.ts";
+ export * from "./desktopAppActivation.ts";
+diff --git a/packages/shared/package.json b/packages/shared/package.json
+index 123da46863a99311e0cd7ee6a6aebd6aef3355d2..3471b7750a8b56726926331e7c64cc8ccb65eccb 100644
+--- a/packages/shared/package.json
++++ b/packages/shared/package.json
+@@ -247,6 +247,14 @@
+       "types": "./src/relayUrl.ts",
+       "import": "./src/relayUrl.ts"
+     },
++    "./connectService": {
++      "types": "./src/connectService.ts",
++      "import": "./src/connectService.ts"
++    },
++    "./connectServiceCopy": {
++      "types": "./src/connectServiceCopy.ts",
++      "import": "./src/connectServiceCopy.ts"
++    },
+     "./relayJwt": {
+       "types": "./src/relayJwt.ts",
+       "import": "./src/relayJwt.ts"
+diff --git a/packages/shared/src/connectService.test.ts b/packages/shared/src/connectService.test.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..c3d184e1bb580f8c7dbadb6ef572bd44a222eb4e
+--- /dev/null
++++ b/packages/shared/src/connectService.test.ts
+@@ -0,0 +1,213 @@
++import { describe, expect, it } from "vite-plus/test";
++
++import {
++  checkConnectService,
++  connectServiceDiscoveryDocument,
++  connectServiceEnvironment,
++  type ConnectServiceFetch,
++  isClerkPublishableKey,
++  parseConnectServiceSettings,
++  readConnectServiceSettings,
++  resolveConnectService,
++} from "./connectService.ts";
++
++const RELAY = "https://relay.example.test";
++const KEY = `pk_live_${btoa("clerk.example.test$")}`;
++const VALUES = {
++  relayUrl: RELAY,
++  clerkPublishableKey: KEY,
++  clerkJwtTemplate: "t3-relay",
++  clerkCliOAuthClientId: "cli-client",
++};
++const NO_SIGN_IN_VALUES = {
++  clerkPublishableKey: "",
++  clerkJwtTemplate: "",
++  clerkCliOAuthClientId: "",
++};
++const BUILT_IN = {
++  relayUrl: "https://relay.built-in.test",
++  clerkPublishableKey: `pk_test_${btoa("built-in.clerk.accounts.dev$")}`,
++  clerkJwtTemplate: "built-in",
++  clerkCliOAuthClientId: null,
++};
++
++/** A relay as the apps see it: a path either answers JSON, answers a status, or fails to connect. */
++function relay(routes: Record<string, unknown>) {
++  const requested: string[] = [];
++  const fetch: ConnectServiceFetch = async (url) => {
++    requested.push(url);
++    const body = routes[new URL(url).pathname];
++    if (body === undefined) return { status: 404, json: async () => null };
++    if (body instanceof Error) throw body;
++    return { status: 200, json: async () => body };
++  };
++  return { fetch, requested };
++}
++
++const METADATA = { "/.well-known/oauth-authorization-server": { issuer: RELAY } };
++
++describe("isClerkPublishableKey", () => {
++  it.each([
++    [KEY, true],
++    [`pk_test_${btoa("tenant.clerk.accounts.dev$")}`, true],
++    ["sk_live_secret", false],
++    ["pk_live_", false],
++    [`pk_live_${btoa("clerk.example.test")}`, false],
++    [`pk_live_${btoa("localhost$")}`, false],
++    ["pk_live_not base64!", false],
++  ])("%s -> %s", (key, expected) => {
++    expect(isClerkPublishableKey(key)).toBe(expected);
++  });
++});
++
++describe("readConnectServiceSettings", () => {
++  it("normalizes a stored service", () => {
++    expect(
++      readConnectServiceSettings(
++        parseConnectServiceSettings(
++          JSON.stringify({ ...VALUES, relayUrl: `${RELAY}/`, source: "manual" }),
++        ),
++      ),
++    ).toEqual({ ...VALUES, source: "manual" });
++  });
++
++  it.each([
++    ["nothing stored", null],
++    ["text that is not JSON", "{"],
++    ["a missing field", JSON.stringify({ relayUrl: RELAY, source: "manual" })],
++    ["an insecure address", JSON.stringify({ ...VALUES, relayUrl: "http://relay.example.test" })],
++    ["a secret key", JSON.stringify({ ...VALUES, clerkPublishableKey: "sk_live_x" })],
++    ["an unknown source", JSON.stringify({ ...VALUES, source: "guessed" })],
++  ])("reads %s as nothing saved", (_name, stored) => {
++    expect(readConnectServiceSettings(parseConnectServiceSettings(stored))).toBeNull();
++  });
++});
++
++describe("resolveConnectService", () => {
++  it("uses the built-in service until one is saved", () => {
++    expect(resolveConnectService(null, BUILT_IN)).toEqual({ ...BUILT_IN, source: "built-in" });
++  });
++
++  it("replaces every built-in value with the saved service", () => {
++    const saved = { ...VALUES, clerkCliOAuthClientId: null, source: "discovered" as const };
++    expect(resolveConnectService(saved, BUILT_IN)).toEqual(saved);
++  });
++
++  it("is not set up when the build ships no service", () => {
++    const empty = { ...BUILT_IN, relayUrl: null, clerkPublishableKey: null };
++    expect(resolveConnectService(null, empty).source).toBe("none");
++  });
++});
++
++describe("connectServiceEnvironment", () => {
++  it("gives a server the saved service and nothing when none is saved", () => {
++    expect(connectServiceEnvironment(null)).toEqual({});
++    expect(connectServiceEnvironment({ ...VALUES, source: "manual" })).toEqual({
++      T3CODE_RELAY_URL: RELAY,
++      T3CODE_CLERK_PUBLISHABLE_KEY: KEY,
++      T3CODE_CLERK_JWT_TEMPLATE: "t3-relay",
++      T3CODE_CLERK_CLI_OAUTH_CLIENT_ID: "cli-client",
++    });
++  });
++});
++
++describe("checkConnectService", () => {
++  it("takes the sign-in values the relay publishes", async () => {
++    const { fetch, requested } = relay({
++      ...METADATA,
++      "/.well-known/t3-connect.json": connectServiceDiscoveryDocument(VALUES),
++    });
++
++    expect(
++      await checkConnectService({ relayUrl: ` ${RELAY}/ `, ...NO_SIGN_IN_VALUES }, { fetch }),
++    ).toEqual({ _tag: "Ready", settings: { ...VALUES, source: "discovered" } });
++    expect(requested).toEqual([
++      `${RELAY}/.well-known/oauth-authorization-server`,
++      `${RELAY}/.well-known/t3-connect.json`,
++    ]);
++  });
++
++  it("uses typed sign-in values without asking the relay for its own", async () => {
++    const { fetch, requested } = relay(METADATA);
++
++    expect(await checkConnectService({ ...VALUES, clerkCliOAuthClientId: "" }, { fetch })).toEqual({
++      _tag: "Ready",
++      settings: { ...VALUES, clerkCliOAuthClientId: null, source: "manual" },
++    });
++    expect(requested).toEqual([`${RELAY}/.well-known/oauth-authorization-server`]);
++  });
++
++  it("names the typed fields that are wrong before contacting anything", async () => {
++    const { fetch, requested } = relay(METADATA);
++
++    expect(
++      await checkConnectService(
++        { ...VALUES, clerkPublishableKey: "sk_live_x", clerkJwtTemplate: "" },
++        { fetch },
++      ),
++    ).toEqual({ _tag: "InvalidFields", fields: ["clerkPublishableKey", "clerkJwtTemplate"] });
++    expect(
++      await checkConnectService(
++        { relayUrl: "relay.example.test", ...NO_SIGN_IN_VALUES },
++        { fetch },
++      ),
++    ).toEqual({ _tag: "InvalidFields", fields: ["relayUrl"] });
++    expect(requested).toEqual([]);
++  });
++
++  it.each([
++    [
++      "a host that does not answer",
++      { "/.well-known/oauth-authorization-server": new Error("offline") },
++      "Unreachable",
++    ],
++    ["a web server that is not a relay", {}, "NotARelay"],
++    ["a relay with no published values", METADATA, "NotPublished"],
++    [
++      "a document from a newer version",
++      {
++        ...METADATA,
++        "/.well-known/t3-connect.json": { ...connectServiceDiscoveryDocument(VALUES), version: 2 },
++      },
++      "UnreadableDocument",
++    ],
++    [
++      "a document for another relay",
++      {
++        ...METADATA,
++        "/.well-known/t3-connect.json": connectServiceDiscoveryDocument({
++          ...VALUES,
++          relayUrl: "https://other.example.test",
++        }),
++      },
++      "UnreadableDocument",
++    ],
++    [
++      "a document with a secret key",
++      {
++        ...METADATA,
++        "/.well-known/t3-connect.json": connectServiceDiscoveryDocument({
++          ...VALUES,
++          clerkPublishableKey: "sk_live_x",
++        }),
++      },
++      "UnreadableDocument",
++    ],
++  ])("does not save %s", async (_name, routes, expected) => {
++    const { fetch } = relay(routes);
++
++    expect(
++      (await checkConnectService({ relayUrl: RELAY, ...NO_SIGN_IN_VALUES }, { fetch }))._tag,
++    ).toBe(expected);
++  });
++
++  it("points at the address the relay calls itself", async () => {
++    const { fetch } = relay({
++      "/.well-known/oauth-authorization-server": { issuer: "https://relay.other.test" },
++    });
++
++    expect(await checkConnectService({ relayUrl: RELAY, ...NO_SIGN_IN_VALUES }, { fetch })).toEqual(
++      { _tag: "RelayAddressMismatch", relayUrl: "https://relay.other.test" },
++    );
++  });
++});
+diff --git a/packages/shared/src/connectService.ts b/packages/shared/src/connectService.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..5c715d6b700cec4b0c7f4f27dfe62dd02bb9c48e
+--- /dev/null
++++ b/packages/shared/src/connectService.ts
+@@ -0,0 +1,271 @@
++// @effect-diagnostics globalTimers:off - Settings screens call these relay requests outside an Effect runtime; each clears its own deadline.
++import {
++  CONNECT_SERVICE_DISCOVERY_PATH,
++  CONNECT_SERVICE_DISCOVERY_VERSION,
++  ConnectServiceDiscoveryDocument,
++  ConnectServiceSettings,
++} from "@t3tools/contracts";
++import * as Option from "effect/Option";
++import * as Schema from "effect/Schema";
++
++import { clerkFrontendApiHostnameFromPublishableKey } from "./relayAuth.ts";
++import { normalizeSecureRelayUrl } from "./relayUrl.ts";
++
++export interface ConnectServiceValues {
++  readonly relayUrl: string;
++  readonly clerkPublishableKey: string;
++  readonly clerkJwtTemplate: string;
++  readonly clerkCliOAuthClientId: string | null;
++}
++
++/** What a build ships with. Any value may be missing; a build with none has Connect off. */
++export type BuiltInConnectService = {
++  readonly [Key in keyof ConnectServiceValues]: string | null;
++};
++
++export type ConnectServiceSource = ConnectServiceSettings["source"] | "built-in" | "none";
++
++export interface ResolvedConnectService extends BuiltInConnectService {
++  readonly source: ConnectServiceSource;
++}
++
++export type ConnectServiceField = keyof ConnectServiceValues;
++
++/** The text a person typed. Empty sign-in fields mean "ask the relay". */
++export type ConnectServiceDraft = { readonly [Key in ConnectServiceField]: string };
++
++const RELAY_METADATA_PATH = "/.well-known/oauth-authorization-server";
++const DEFAULT_TIMEOUT_MS = 10_000;
++const IDENTIFIER = /^[\w.:-]{1,128}$/u;
++
++const decodeSettings = Schema.decodeUnknownOption(ConnectServiceSettings);
++const decodeDiscoveryDocument = Schema.decodeUnknownOption(ConnectServiceDiscoveryDocument);
++const decodeRelayMetadata = Schema.decodeUnknownOption(Schema.Struct({ issuer: Schema.String }));
++
++/** Clerk keys are `pk_<test|live>_` followed by base64 of the Frontend API host and a `$`. */
++export function isClerkPublishableKey(value: string): boolean {
++  const encoded = /^pk_(?:test|live)_(.+)$/u.exec(value)?.[1];
++  if (encoded === undefined) return false;
++  try {
++    if (!globalThis.atob(encoded).endsWith("$")) return false;
++    return clerkFrontendApiHostnameFromPublishableKey(value).includes(".");
++  } catch {
++    return false;
++  }
++}
++
++export function validateConnectServiceValues(input: {
++  readonly [Key in ConnectServiceField]: string | null;
++}):
++  | { readonly ok: true; readonly values: ConnectServiceValues }
++  | { readonly ok: false; readonly fields: ReadonlyArray<ConnectServiceField> } {
++  const relayUrl = normalizeSecureRelayUrl(input.relayUrl ?? "");
++  const clerkPublishableKey = input.clerkPublishableKey?.trim() ?? "";
++  const clerkJwtTemplate = input.clerkJwtTemplate?.trim() ?? "";
++  const clerkCliOAuthClientId = input.clerkCliOAuthClientId?.trim() || null;
++  const fields: ConnectServiceField[] = [];
++  if (relayUrl === null) fields.push("relayUrl");
++  if (!isClerkPublishableKey(clerkPublishableKey)) fields.push("clerkPublishableKey");
++  if (!IDENTIFIER.test(clerkJwtTemplate)) fields.push("clerkJwtTemplate");
++  if (clerkCliOAuthClientId !== null && !IDENTIFIER.test(clerkCliOAuthClientId)) {
++    fields.push("clerkCliOAuthClientId");
++  }
++  return relayUrl === null || fields.length > 0
++    ? { ok: false, fields }
++    : {
++        ok: true,
++        values: { relayUrl, clerkPublishableKey, clerkJwtTemplate, clerkCliOAuthClientId },
++      };
++}
++
++/** Reads what a device stored. Anything unusable reads as "nothing saved", never as an error. */
++export function readConnectServiceSettings(stored: unknown): ConnectServiceSettings | null {
++  const decoded = decodeSettings(stored);
++  if (Option.isNone(decoded)) return null;
++  const validated = validateConnectServiceValues(decoded.value);
++  return validated.ok ? { ...validated.values, source: decoded.value.source } : null;
++}
++
++export function parseConnectServiceSettings(json: string | null | undefined): unknown {
++  if (!json) return null;
++  try {
++    return JSON.parse(json);
++  } catch {
++    return null;
++  }
++}
++
++/** A saved service replaces the built-in one whole, so the four values always belong together. */
++export function resolveConnectService(
++  saved: ConnectServiceSettings | null,
++  builtIn: BuiltInConnectService,
++): ResolvedConnectService {
++  if (saved !== null) return saved;
++  return {
++    ...builtIn,
++    source: builtIn.relayUrl && builtIn.clerkPublishableKey ? "built-in" : "none",
++  };
++}
++
++/** Server and CLI configuration names for a saved service; the server reads these before its build values. */
++export function connectServiceEnvironment(
++  saved: ConnectServiceSettings | null,
++): Record<string, string> {
++  if (saved === null) return {};
++  return {
++    T3CODE_RELAY_URL: saved.relayUrl,
++    T3CODE_CLERK_PUBLISHABLE_KEY: saved.clerkPublishableKey,
++    T3CODE_CLERK_JWT_TEMPLATE: saved.clerkJwtTemplate,
++    ...(saved.clerkCliOAuthClientId
++      ? { T3CODE_CLERK_CLI_OAUTH_CLIENT_ID: saved.clerkCliOAuthClientId }
++      : {}),
++  };
++}
++
++function connectServiceDiscoveryUrl(relayUrl: string): string {
++  return `${relayUrl}${CONNECT_SERVICE_DISCOVERY_PATH}`;
++}
++
++export function connectServiceDiscoveryDocument(
++  values: ConnectServiceValues,
++): ConnectServiceDiscoveryDocument {
++  return {
++    version: CONNECT_SERVICE_DISCOVERY_VERSION,
++    relayUrl: values.relayUrl,
++    clerk: {
++      publishableKey: values.clerkPublishableKey,
++      jwtTemplate: values.clerkJwtTemplate,
++      ...(values.clerkCliOAuthClientId ? { cliOAuthClientId: values.clerkCliOAuthClientId } : {}),
++    },
++  };
++}
++
++export type ConnectServiceFetch = (
++  url: string,
++  init: {
++    readonly signal: AbortSignal;
++    readonly redirect: "error";
++    readonly headers: { readonly accept: string };
++  },
++) => Promise<{ readonly status: number; readonly json: () => Promise<unknown> }>;
++
++export interface ConnectServiceRequestOptions {
++  readonly fetch: ConnectServiceFetch;
++  readonly timeoutMs?: number;
++}
++
++type JsonResponse =
++  | { readonly _tag: "Json"; readonly body: unknown }
++  | { readonly _tag: "Status"; readonly status: number }
++  | { readonly _tag: "Unreachable" };
++
++async function getJson(url: string, options: ConnectServiceRequestOptions): Promise<JsonResponse> {
++  const abort = new AbortController();
++  const timer = setTimeout(() => abort.abort(), options.timeoutMs ?? DEFAULT_TIMEOUT_MS);
++  try {
++    // A relay never redirects these, so a redirect is some other host answering.
++    const response = await options.fetch(url, {
++      signal: abort.signal,
++      redirect: "error",
++      headers: { accept: "application/json" },
++    });
++    if (response.status !== 200) return { _tag: "Status", status: response.status };
++    return { _tag: "Json", body: await response.json() };
++  } catch {
++    return { _tag: "Unreachable" };
++  } finally {
++    clearTimeout(timer);
++  }
++}
++
++export type ConnectRelayProbe =
++  | { readonly _tag: "Relay" }
++  | { readonly _tag: "Unreachable" }
++  | { readonly _tag: "NotARelay" }
++  | { readonly _tag: "RelayAddressMismatch"; readonly relayUrl: string };
++
++/** Every relay already serves this metadata, so it tells a relay from any other web server. */
++async function probeConnectRelay(
++  relayUrl: string,
++  options: ConnectServiceRequestOptions,
++): Promise<ConnectRelayProbe> {
++  const response = await getJson(`${relayUrl}${RELAY_METADATA_PATH}`, options);
++  if (response._tag === "Unreachable") return response;
++  if (response._tag === "Status") return { _tag: "NotARelay" };
++  const metadata = decodeRelayMetadata(response.body);
++  const issuer = Option.isSome(metadata) ? normalizeSecureRelayUrl(metadata.value.issuer) : null;
++  if (issuer === null) return { _tag: "NotARelay" };
++  // Tokens are bound to the address the relay names itself, so an alias would fail at sign-in.
++  return issuer === relayUrl
++    ? { _tag: "Relay" }
++    : { _tag: "RelayAddressMismatch", relayUrl: issuer };
++}
++
++export type ConnectServiceDiscovery =
++  | { readonly _tag: "Discovered"; readonly values: ConnectServiceValues }
++  | { readonly _tag: "NotPublished" }
++  | { readonly _tag: "Unreachable" }
++  | { readonly _tag: "UnreadableDocument" };
++
++async function discoverConnectService(
++  relayUrl: string,
++  options: ConnectServiceRequestOptions,
++): Promise<ConnectServiceDiscovery> {
++  const response = await getJson(connectServiceDiscoveryUrl(relayUrl), options);
++  if (response._tag === "Unreachable") return response;
++  if (response._tag === "Status") {
++    return response.status === 404 ? { _tag: "NotPublished" } : { _tag: "Unreachable" };
++  }
++  const document = decodeDiscoveryDocument(response.body);
++  if (
++    Option.isNone(document) ||
++    document.value.version !== CONNECT_SERVICE_DISCOVERY_VERSION ||
++    normalizeSecureRelayUrl(document.value.relayUrl) !== relayUrl
++  ) {
++    return { _tag: "UnreadableDocument" };
++  }
++  const validated = validateConnectServiceValues({
++    relayUrl,
++    clerkPublishableKey: document.value.clerk.publishableKey,
++    clerkJwtTemplate: document.value.clerk.jwtTemplate,
++    clerkCliOAuthClientId: document.value.clerk.cliOAuthClientId ?? null,
++  });
++  return validated.ok
++    ? { _tag: "Discovered", values: validated.values }
++    : { _tag: "UnreadableDocument" };
++}
++
++export type ConnectServiceCheck =
++  | { readonly _tag: "Ready"; readonly settings: ConnectServiceSettings }
++  | { readonly _tag: "InvalidFields"; readonly fields: ReadonlyArray<ConnectServiceField> }
++  | Exclude<ConnectRelayProbe, { readonly _tag: "Relay" }>
++  | Exclude<ConnectServiceDiscovery, { readonly _tag: "Discovered" | "Unreachable" }>;
++
++/**
++ * Turns what a person typed into settings that are safe to save: the address must be a relay
++ * that answers, and the sign-in values come from the relay unless any were typed in.
++ */
++export async function checkConnectService(
++  draft: ConnectServiceDraft,
++  options: ConnectServiceRequestOptions,
++): Promise<ConnectServiceCheck> {
++  const relayUrl = normalizeSecureRelayUrl(draft.relayUrl);
++  if (relayUrl === null) return { _tag: "InvalidFields", fields: ["relayUrl"] };
++  const manual =
++    `${draft.clerkPublishableKey}${draft.clerkJwtTemplate}${draft.clerkCliOAuthClientId}`.trim()
++      .length > 0;
++  if (manual) {
++    const validated = validateConnectServiceValues(draft);
++    if (!validated.ok) return { _tag: "InvalidFields", fields: validated.fields };
++    const probe = await probeConnectRelay(relayUrl, options);
++    return probe._tag === "Relay"
++      ? { _tag: "Ready", settings: { ...validated.values, source: "manual" } }
++      : probe;
++  }
++  const probe = await probeConnectRelay(relayUrl, options);
++  if (probe._tag !== "Relay") return probe;
++  const discovery = await discoverConnectService(relayUrl, options);
++  return discovery._tag === "Discovered"
++    ? { _tag: "Ready", settings: { ...discovery.values, source: "discovered" } }
++    : discovery;
++}
+diff --git a/packages/shared/src/connectServiceCopy.ts b/packages/shared/src/connectServiceCopy.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..96fb471b4fd2435e539456b9d0e20687cc89397d
+--- /dev/null
++++ b/packages/shared/src/connectServiceCopy.ts
+@@ -0,0 +1,64 @@
++import { mFallback, msg } from "gt-i18n";
++import type { MFunctionType } from "gt-i18n/types";
++
++import type {
++  ConnectServiceCheck,
++  ConnectServiceField,
++  ConnectServiceSource,
++} from "./connectService.ts";
++
++const INVALID_FIELD_COPY: Readonly<Record<ConnectServiceField, string>> = {
++  relayUrl: msg("Enter the address as https://, with no path."),
++  clerkPublishableKey: msg("The sign-in key should start with pk_live_ or pk_test_."),
++  clerkJwtTemplate: msg("Enter the token template name, such as t3-relay."),
++  clerkCliOAuthClientId: msg("The command-line client ID has characters it cannot contain."),
++};
++
++/** Why a Connect service could not be saved, in the order a person would fix it. */
++export function connectServiceCheckProblem(
++  check: Exclude<ConnectServiceCheck, { readonly _tag: "Ready" }>,
++  resolve: MFunctionType = mFallback,
++): string {
++  switch (check._tag) {
++    case "InvalidFields":
++      return resolve(INVALID_FIELD_COPY[check.fields[0] ?? "relayUrl"]);
++    case "Unreachable":
++      return resolve(
++        msg("Could not reach a T3 Connect service at this address. Check it and your connection."),
++      );
++    case "NotARelay":
++      return resolve(msg("This address answers, but it is not a T3 Connect service."));
++    case "RelayAddressMismatch":
++      return resolve(
++        msg("This service is known by another address. Use {relayUrl} instead.", {
++          relayUrl: check.relayUrl,
++        }),
++      );
++    case "NotPublished":
++      return resolve(
++        msg("This service does not publish its sign-in values. Enter them under Advanced."),
++      );
++    case "UnreadableDocument":
++      return resolve(
++        msg(
++          "This app cannot read the sign-in values this service publishes. Enter them under Advanced.",
++        ),
++      );
++  }
++}
++
++export function connectServiceSourceLabel(
++  source: ConnectServiceSource,
++  resolve: MFunctionType = mFallback,
++): string {
++  switch (source) {
++    case "built-in":
++      return resolve(msg("Built into this app"));
++    case "discovered":
++      return resolve(msg("Sign-in values published by the service"));
++    case "manual":
++      return resolve(msg("Sign-in values entered on this device"));
++    case "none":
++      return resolve(msg("Not set up"));
++  }
++}

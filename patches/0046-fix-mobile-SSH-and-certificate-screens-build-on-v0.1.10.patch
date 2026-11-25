@@ -1,0 +1,88 @@
+diff --git a/apps/mobile/modules/t3-ssh/e2e/write-remote-scripts.ts b/apps/mobile/modules/t3-ssh/e2e/write-remote-scripts.ts
+index 01c57c5fa819e7124aae04363cae93add4b46bed..dd0b71ee86966c4084a95560d6c1b68492ed2b69 100644
+--- a/apps/mobile/modules/t3-ssh/e2e/write-remote-scripts.ts
++++ b/apps/mobile/modules/t3-ssh/e2e/write-remote-scripts.ts
+@@ -1,3 +1,4 @@
++// @effect-diagnostics nodeBuiltinImport:off - a Node script the JVM end-to-end test runs.
+ // Writes the scripts T3ServerEndToEndTest runs, exactly as the app builds them.
+ // Usage (from apps/mobile): node modules/t3-ssh/e2e/write-remote-scripts.ts <dir> <t3 version>
+ import * as NodeFS from "node:fs";
+diff --git a/apps/mobile/src/connection/ssh/gateway.ts b/apps/mobile/src/connection/ssh/gateway.ts
+index 9df6580a2e3215eaf0f5c77516ded345066afb51..ec3f72c1e076d59243f9188ba2da142016395cac 100644
+--- a/apps/mobile/src/connection/ssh/gateway.ts
++++ b/apps/mobile/src/connection/ssh/gateway.ts
+@@ -68,7 +68,7 @@ const answers = (httpBaseUrl: string) =>
+     makeError: () => "unanswered" as const,
+   }).pipe(
+     Effect.as(true),
+-    Effect.catch(() => Effect.succeed(false)),
++    Effect.orElseSucceed(() => false),
+   );
+ 
+ /**
+@@ -279,10 +279,16 @@ export const makeSshGateway = Effect.fn("mobile.ssh.makeGateway")(function* (
+       );
+ 
+   return ClientCapabilities.SshEnvironmentGateway.of({
+-    provision: (target, expectedEnvironmentId) =>
+-      provision(target, expectedEnvironmentId).pipe(resetOnFailure(target)),
+-    prepare: (input) => prepare(input).pipe(resetOnFailure(input.target)),
+-    disconnect: (target) => dropTunnel(sshTargetKey(target)),
++    provision: Effect.fn("ClientCapabilities.SshEnvironmentGateway.provision")(
++      (target: DesktopSshEnvironmentTarget, expectedEnvironmentId?: EnvironmentId) =>
++        provision(target, expectedEnvironmentId).pipe(resetOnFailure(target)),
++    ),
++    prepare: Effect.fn("ClientCapabilities.SshEnvironmentGateway.prepare")(
++      (input: Parameters<typeof prepare>[0]) => prepare(input).pipe(resetOnFailure(input.target)),
++    ),
++    disconnect: Effect.fn("ClientCapabilities.SshEnvironmentGateway.disconnect")(
++      (target: DesktopSshEnvironmentTarget) => dropTunnel(sshTargetKey(target)),
++    ),
+   });
+ });
+ 
+diff --git a/apps/mobile/src/connection/ssh/hostKeys.ts b/apps/mobile/src/connection/ssh/hostKeys.ts
+index d6d831779080ecd55cd8a8a418b18cba355d9861..c68e8e68cb62401f8d3fa0c8415dd09b7b680e8e 100644
+--- a/apps/mobile/src/connection/ssh/hostKeys.ts
++++ b/apps/mobile/src/connection/ssh/hostKeys.ts
+@@ -1,5 +1,6 @@
+ import type { SshHop, SshHostKeyRejection, SshNative } from "./native";
+ 
++// @effect-diagnostics-next-line extendsNativeError:off - thrown from Promise code, not an Effect failure.
+ export class SshHostKeyChangedError extends Error {
+   constructor(readonly rejection: SshHostKeyRejection) {
+     super(
+diff --git a/apps/mobile/src/features/settings/components/SettingsRow.tsx b/apps/mobile/src/features/settings/components/SettingsRow.tsx
+index ce61dec7cfe69d5100b15fb3ac4766fec44e2e82..b7c3ad706464b25c3a278ae96a62aebf84af54b4 100644
+--- a/apps/mobile/src/features/settings/components/SettingsRow.tsx
++++ b/apps/mobile/src/features/settings/components/SettingsRow.tsx
+@@ -1,4 +1,4 @@
+-import { useNavigation, useRoute } from "@react-navigation/native";
++import { CommonActions, useNavigation, useRoute } from "@react-navigation/native";
+ import { use, type ComponentProps } from "react";
+ import { Platform } from "react-native";
+ 
+@@ -37,7 +37,8 @@ export function SettingsRow(props: {
+   const onPress = () => {
+     if (props.target) {
+       if (inList) openSettings(navigation, props.target);
+-      else navigation.navigate(props.target);
++      // navigate()'s overloads stop matching a union of more than 25 route names; the action is the same.
++      else navigation.dispatch(CommonActions.navigate(props.target));
+     } else if (props.fullScreenTarget) {
+       navigation.navigate(props.fullScreenTarget);
+     } else {
+diff --git a/apps/mobile/src/lib/useMediaVideoPlayback.test.tsx b/apps/mobile/src/lib/useMediaVideoPlayback.test.tsx
+index d5cc47250cb83e7adacc0100095b80b69403daae..da47cc21c6e04c5ac8df6c4f97b0bfad21f39835 100644
+--- a/apps/mobile/src/lib/useMediaVideoPlayback.test.tsx
++++ b/apps/mobile/src/lib/useMediaVideoPlayback.test.tsx
+@@ -99,6 +99,9 @@ vi.mock("../state/assets", () => ({
+   useRefreshAssetUrl: () => mocks.refresh,
+ }));
+ vi.mock("./localAttachmentPreview", () => ({ loadLocalAttachmentPreview: vi.fn() }));
++vi.mock("./certificateMedia", () => ({
++  loadCertificateMedia: async (uri: string) => ({ uri, dispose: () => {} }),
++}));
+ vi.mock("./videoThumbnails", () => ({
+   cachedVideoThumbnail: () => null,
+   loadVideoThumbnail: mocks.thumbnail,

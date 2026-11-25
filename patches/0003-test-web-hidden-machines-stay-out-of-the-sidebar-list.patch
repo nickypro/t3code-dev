@@ -1,0 +1,56 @@
+diff --git a/apps/web/src/components/Sidebar.browser.test.tsx b/apps/web/src/components/Sidebar.browser.test.tsx
+index 87f43d9f901f693ffa26f2b86835f1bde482fb42..ab9f452694d9100d1987591d2d3a1c1d2e356605 100644
+--- a/apps/web/src/components/Sidebar.browser.test.tsx
++++ b/apps/web/src/components/Sidebar.browser.test.tsx
+@@ -574,3 +574,51 @@ describe("sidebar settled pagination", () => {
+     expect(screen.container.querySelectorAll("[data-thread-item]")).toHaveLength(loadedRows);
+   });
+ });
++
++describe("sidebar hidden machines", () => {
++  it("leaves a hidden machine's threads out of the list but keeps the open one", async () => {
++    using stack = new DisposableStack();
++    const previousSettings = getClientSettings();
++    stack.defer(() => __setClientSettingsForTests(previousSettings));
++    __setClientSettingsForTests({
++      ...DEFAULT_CLIENT_SETTINGS,
++      sidebarHiddenEnvironmentIds: ["remote"],
++    });
++    const localProject = project("active");
++    const remoteProject = { ...project("busy"), environmentId: EnvironmentId.make("remote") };
++    const onRemote = (index: number, title: string) =>
++      makeThreadFixture({
++        environmentId: remoteProject.environmentId,
++        id: ThreadId.make(`remote-${index}`),
++        projectId: remoteProject.id,
++        title,
++      });
++    const openThread = onRemote(1, "Remote open thread");
++    const threadRef = { environmentId: openThread.environmentId, threadId: openThread.id };
++    vi.mocked(useProjects).mockReturnValue([localProject, remoteProject]);
++    vi.mocked(useQuietThreadShells).mockReturnValue([
++      { ...threadShell(localProject.id, 0), title: "Local thread" },
++      onRemote(0, "Remote hidden thread"),
++      openThread,
++    ]);
++    vi.mocked(useThreadRouteTarget).mockReturnValue({ kind: "server", threadRef });
++    vi.mocked(useHandleNewThread).mockReturnValue({
++      activeDraftThread: null,
++      activeThread: null,
++      defaultProjectRef: { environmentId: localProject.environmentId, projectId: localProject.id },
++      defaultProjectFallbackReady: true,
++      handleNewThread: vi.fn().mockResolvedValue(null),
++      routeDraftId: null,
++      routeThreadRef: threadRef,
++    });
++    await using screen = await render(
++      <SidebarProvider>
++        <Sidebar routeReveal={{ observedKey: null, pendingKey: null }} />
++      </SidebarProvider>,
++    );
++
++    await expect.element(screen.getByText("Local thread").first()).toBeInTheDocument();
++    await expect.element(screen.getByText("Remote open thread").first()).toBeInTheDocument();
++    expect(screen.container.textContent).not.toContain("Remote hidden thread");
++  });
++});

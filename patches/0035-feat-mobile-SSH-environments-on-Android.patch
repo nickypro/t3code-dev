@@ -1,0 +1,1188 @@
+diff --git a/apps/mobile/modules/t3-ssh/e2e/write-remote-scripts.ts b/apps/mobile/modules/t3-ssh/e2e/write-remote-scripts.ts
+index 98ae7946326a415b32848cea9302665e15495529..01c57c5fa819e7124aae04363cae93add4b46bed 100644
+--- a/apps/mobile/modules/t3-ssh/e2e/write-remote-scripts.ts
++++ b/apps/mobile/modules/t3-ssh/e2e/write-remote-scripts.ts
+@@ -19,5 +19,8 @@ const runner = { archiveVersion };
+ NodeFS.mkdirSync(outDir, { recursive: true });
+ NodeFS.writeFileSync(NodePath.join(outDir, "state-key"), stateKey);
+ NodeFS.writeFileSync(NodePath.join(outDir, "launch.sh"), buildRemoteLaunchScript(runner));
+-NodeFS.writeFileSync(NodePath.join(outDir, "pairing.sh"), buildRemotePairingScript(stateKey, runner));
++NodeFS.writeFileSync(
++  NodePath.join(outDir, "pairing.sh"),
++  buildRemotePairingScript(stateKey, runner),
++);
+ NodeFS.writeFileSync(NodePath.join(outDir, "stop.sh"), buildRemoteStopScript(stateKey));
+diff --git a/apps/mobile/src/connection/onboarding.ts b/apps/mobile/src/connection/onboarding.ts
+index bf10122432349beca044fbbb962e8a1a856742a0..73a9158d58cfb41c9323be18513473cdf0bff5c6 100644
+--- a/apps/mobile/src/connection/onboarding.ts
++++ b/apps/mobile/src/connection/onboarding.ts
+@@ -1,9 +1,9 @@
+-import { ConnectionOnboarding } from "@t3tools/client-runtime/connection";
++import { ConnectionOnboarding, sshTargetKey } from "@t3tools/client-runtime/connection";
+ import {
+   createAtomCommandScheduler,
+   createRuntimeCommand,
+ } from "@t3tools/client-runtime/state/runtime";
+-import type { EnvironmentId } from "@t3tools/contracts";
++import type { DesktopSshEnvironmentTarget, EnvironmentId } from "@t3tools/contracts";
+ import * as Effect from "effect/Effect";
+ 
+ import { connectionAtomRuntime } from "./runtime";
+@@ -52,3 +52,16 @@ export const reachesEnvironment = createRuntimeCommand(connectionAtomRuntime, {
+       Effect.flatMap((onboarding) => onboarding.reaches(input)),
+     ),
+ });
++
++export const connectSshEnvironment = createRuntimeCommand(connectionAtomRuntime, {
++  label: "mobile:connection:connect-ssh",
++  scheduler: onboardingScheduler,
++  concurrency: {
++    mode: "singleFlight",
++    key: (input: { readonly target: DesktopSshEnvironmentTarget }) => sshTargetKey(input.target),
++  },
++  execute: (input: { readonly target: DesktopSshEnvironmentTarget }) =>
++    ConnectionOnboarding.ConnectionOnboarding.pipe(
++      Effect.flatMap((onboarding) => onboarding.registerSsh({ target: input.target })),
++    ),
++});
+diff --git a/apps/mobile/src/connection/platform.ts b/apps/mobile/src/connection/platform.ts
+index 0ed1a8fa0b8e004848b154bd091a0481531964fa..537b3816ccbb4fb8f5a62d729d0580e3028eeb32 100644
+--- a/apps/mobile/src/connection/platform.ts
++++ b/apps/mobile/src/connection/platform.ts
+@@ -15,7 +15,9 @@ import * as Layer from "effect/Layer";
+ import * as Option from "effect/Option";
+ import * as Queue from "effect/Queue";
+ import * as Stream from "effect/Stream";
++import { HttpClient } from "effect/http";
+ import Constants from "expo-constants";
++import * as ExpoCrypto from "expo-crypto";
+ import * as Network from "expo-network";
+ import { AppState } from "react-native";
+ 
+@@ -26,6 +28,8 @@ import { appAtomRegistry } from "../state/atom-registry";
+ import { mobileApplicationActiveWakeup } from "./app-state-wakeups";
+ import * as EnvironmentOwnedDataCleanup from "./environment-owned-data-cleanup";
+ import * as ConnectionStorage from "./storage";
++import { makeSshGateway } from "./ssh/gateway";
++import { sshNative } from "./ssh/native";
+ 
+ function networkStatus(state: Network.NetworkState): "unknown" | "offline" | "online" {
+   if (state.isConnected === false) {
+@@ -149,7 +153,18 @@ const layerWakeups = Wakeups.layer({
+ const layerCapabilities = Layer.effectContext(
+   Effect.gen(function* () {
+     const storage = yield* MobileStorage.MobileStorage;
+-    return Context.make(
++    // Android reaches SSH hosts with its native module; elsewhere the stub below stays.
++    const sshGateway =
++      sshNative === null
++        ? null
++        : yield* makeSshGateway({
++            native: sshNative,
++            httpClient: yield* HttpClient.HttpClient,
++            clientMetadata: authClientMetadata(Constants.expoConfig?.version),
++            sha256Hex: (text) =>
++              ExpoCrypto.digestStringAsync(ExpoCrypto.CryptoDigestAlgorithm.SHA256, text),
++          });
++    const capabilities = Context.make(
+       ClientCapabilities.CloudSession,
+       ClientCapabilities.CloudSession.of({
+         identity: Effect.sync(() =>
+@@ -251,6 +266,9 @@ const layerCapabilities = Layer.effectContext(
+         }),
+       ),
+     );
++    return sshGateway === null
++      ? capabilities
++      : Context.add(capabilities, ClientCapabilities.SshEnvironmentGateway, sshGateway);
+   }),
+ );
+ 
+diff --git a/apps/mobile/src/connection/ssh/gateway.test.ts b/apps/mobile/src/connection/ssh/gateway.test.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..ca858f9f53090a59901b3fca46ee1d438598d01a
+--- /dev/null
++++ b/apps/mobile/src/connection/ssh/gateway.test.ts
+@@ -0,0 +1,282 @@
++import { describe, expect, it } from "@effect/vitest";
++import {
++  AuthStandardClientScopes,
++  type DesktopSshEnvironmentTarget,
++  EnvironmentId,
++} from "@t3tools/contracts";
++import { targetConnectionKey } from "@t3tools/ssh/remoteScripts";
++import * as Effect from "effect/Effect";
++import { HttpClient } from "effect/http";
++import * as NodeCrypto from "node:crypto";
++import { vi } from "vite-plus/test";
++
++const http = vi.hoisted(() => ({
++  descriptor: vi.fn(),
++  exchange: vi.fn(),
++  session: vi.fn(),
++}));
++
++vi.mock("expo", () => ({ requireOptionalNativeModule: () => null }));
++vi.mock("@t3tools/client-runtime/environment", () => ({
++  fetchRemoteEnvironmentDescriptor: (input: unknown) => http.descriptor(input),
++}));
++vi.mock("@t3tools/client-runtime/authorization", () => ({
++  bootstrapRemoteBearerSession: (input: unknown) => http.exchange(input),
++  fetchRemoteSessionState: (input: unknown) => http.session(input),
++}));
++
++import { makeSshGateway } from "./gateway";
++import type { SshConnectResult, SshNative } from "./native";
++
++const CONFIG = `
++Host jump
++  HostName jump.example
++  User me
++Host box
++  HostName 127.0.0.1
++  Port 2222
++  User dev
++  ProxyJump jump
++`;
++const TARGET: DesktopSshEnvironmentTarget = {
++  alias: "box",
++  hostname: "127.0.0.1",
++  username: "dev",
++  port: 2222,
++};
++const ENVIRONMENT = EnvironmentId.make("env-box");
++const sha256Hex = async (text: string) =>
++  NodeCrypto.createHash("sha256").update(text).digest("hex");
++
++function setup(options: { readonly connect?: () => SshConnectResult } = {}) {
++  http.descriptor
++    .mockReset()
++    .mockImplementation(() => Effect.succeed({ environmentId: ENVIRONMENT, label: "box" }));
++  http.exchange.mockReset().mockImplementation(() => Effect.succeed({ access_token: "token-new" }));
++  http.session
++    .mockReset()
++    .mockImplementation(() =>
++      Effect.succeed({ authenticated: true, scopes: [...AuthStandardClientScopes] }),
++    );
++  const open = new Set<string>();
++  let sessions = 0;
++  const native = {
++    readConfig: vi.fn(async () => CONFIG),
++    connect: vi.fn(async (_hops: unknown): Promise<SshConnectResult> => {
++      if (options.connect) return options.connect();
++      const sessionId = `session-${++sessions}`;
++      open.add(sessionId);
++      return { status: "connected", sessionId };
++    }),
++    exec: vi.fn(async (_id: string, command: string, _stdin: string, _timeoutMs: number) =>
++      command.startsWith("sh -l -s")
++        ? { exitCode: 0, stdout: 'motd\n{"remotePort":3777,"serverKind":"external"}\n', stderr: "" }
++        : { exitCode: 0, stdout: '{"credential":"pairing-1"}\n', stderr: "" },
++    ),
++    forward: vi.fn(async (_id: string, _remotePort: number) => 41001),
++    isOpen: (id: string) => open.has(id),
++    close: vi.fn(async (id: string) => {
++      open.delete(id);
++    }),
++    trustHostKey: vi.fn(async () => undefined),
++  };
++  const gateway = makeSshGateway({
++    native: native as typeof native & SshNative,
++    httpClient: {} as HttpClient.HttpClient,
++    clientMetadata: { label: "Phone", os: "Android" },
++    sha256Hex,
++  });
++  return { native, open, gateway };
++}
++
++describe("mobile SSH gateway", () => {
++  it.effect("starts the server, forwards its port and pairs through the forward", () =>
++    Effect.gen(function* () {
++      const { native, gateway } = setup();
++      const ssh = yield* gateway;
++
++      const provisioned = yield* ssh.provision(TARGET);
++
++      const stateKey = (yield* Effect.promise(() => sha256Hex(targetConnectionKey(TARGET)))).slice(
++        0,
++        16,
++      );
++      expect(native.connect.mock.calls[0]?.[0]).toEqual([
++        { host: "jump.example", port: 22, user: "me", hostKeyAlias: null },
++        { host: "127.0.0.1", port: 2222, user: "dev", hostKeyAlias: null },
++      ]);
++      expect(native.exec.mock.calls.map((call) => call[1])).toEqual([
++        `sh -l -s -- ${stateKey}`,
++        "sh -s",
++      ]);
++      expect(native.forward).toHaveBeenCalledWith("session-1", 3777);
++      expect(http.exchange).toHaveBeenCalledWith(
++        expect.objectContaining({
++          httpBaseUrl: "http://127.0.0.1:41001/",
++          credential: "pairing-1",
++        }),
++      );
++      expect(provisioned).toMatchObject({
++        environmentId: ENVIRONMENT,
++        bearerToken: "token-new",
++        bootstrap: {
++          wsBaseUrl: "ws://127.0.0.1:41001/",
++          remotePort: 3777,
++          remoteServerKind: "external",
++        },
++      });
++    }),
++  );
++
++  it.effect("reuses the tunnel and a still-granted token without pairing again", () =>
++    Effect.gen(function* () {
++      const { native, gateway } = setup();
++      const ssh = yield* gateway;
++      yield* ssh.provision(TARGET);
++      native.exec.mockClear();
++
++      const prepared = yield* ssh.prepare({
++        connectionId: "ssh:env-box",
++        expectedEnvironmentId: ENVIRONMENT,
++        target: TARGET,
++        bearerToken: "token-saved",
++      });
++
++      expect(prepared.bearerToken).toBe("token-saved");
++      expect(native.connect).toHaveBeenCalledTimes(1);
++      expect(native.exec).not.toHaveBeenCalled();
++    }),
++  );
++
++  it.effect("pairs again when the saved token lost a standard scope", () =>
++    Effect.gen(function* () {
++      const { native, gateway } = setup();
++      const ssh = yield* gateway;
++      http.session.mockImplementation(() => Effect.succeed({ authenticated: true, scopes: [] }));
++
++      const prepared = yield* ssh.prepare({
++        connectionId: "ssh:env-box",
++        expectedEnvironmentId: ENVIRONMENT,
++        target: TARGET,
++        bearerToken: "token-old",
++      });
++
++      expect(prepared.bearerToken).toBe("token-new");
++      expect(native.exec.mock.calls.map((call) => call[1])).toContain("sh -s");
++    }),
++  );
++
++  it.effect("blocks on an untrusted host key instead of trusting it in the background", () =>
++    Effect.gen(function* () {
++      const { native, gateway } = setup({
++        connect: () => ({
++          status: "host-key-rejected",
++          host: "jump.example",
++          port: 22,
++          knownHostsName: "jump.example",
++          keyType: "ssh-ed25519",
++          fingerprint: "SHA256:x",
++          knownHostsLine: "jump.example ssh-ed25519 AAAA",
++          changed: true,
++        }),
++      });
++      const ssh = yield* gateway;
++
++      const error = yield* Effect.flip(
++        ssh.prepare({
++          connectionId: "c",
++          expectedEnvironmentId: ENVIRONMENT,
++          target: TARGET,
++          bearerToken: "t",
++        }),
++      );
++
++      expect(error).toMatchObject({ _tag: "ConnectionBlockedError", reason: "authentication" });
++      expect(native.trustHostKey).not.toHaveBeenCalled();
++    }),
++  );
++
++  it.effect("starts over after a failure instead of reusing a forward to a dead port", () =>
++    Effect.gen(function* () {
++      const { native, gateway } = setup();
++      const ssh = yield* gateway;
++      yield* ssh.provision(TARGET);
++      http.descriptor.mockImplementationOnce(() =>
++        Effect.fail({ _tag: "RemoteEnvironmentAuthFetchError", message: "connection refused" }),
++      );
++      const input = {
++        connectionId: "c",
++        expectedEnvironmentId: ENVIRONMENT,
++        target: TARGET,
++        bearerToken: "t",
++      };
++
++      const error = yield* Effect.flip(ssh.prepare(input));
++      expect(error).toMatchObject({ _tag: "ConnectionTransientError", reason: "network" });
++      expect(native.close).toHaveBeenCalledWith("session-1");
++
++      yield* ssh.prepare(input);
++      expect(native.connect).toHaveBeenCalledTimes(2);
++    }),
++  );
++
++  it.effect("replaces a session that died between attempts", () =>
++    Effect.gen(function* () {
++      const { native, open, gateway } = setup();
++      const ssh = yield* gateway;
++      yield* ssh.provision(TARGET);
++      open.clear();
++
++      yield* ssh.prepare({
++        connectionId: "c",
++        expectedEnvironmentId: ENVIRONMENT,
++        target: TARGET,
++        bearerToken: "t",
++      });
++
++      expect(native.connect).toHaveBeenCalledTimes(2);
++      expect(native.forward).toHaveBeenLastCalledWith("session-2", 3777);
++    }),
++  );
++
++  it.effect("refuses a host that turns out to be a different environment, before pairing", () =>
++    Effect.gen(function* () {
++      const { gateway } = setup();
++      const ssh = yield* gateway;
++      http.descriptor.mockImplementation(() =>
++        Effect.succeed({ environmentId: EnvironmentId.make("env-other"), label: "other" }),
++      );
++
++      const error = yield* Effect.flip(ssh.provision(TARGET, ENVIRONMENT));
++
++      expect(error).toMatchObject({ _tag: "ConnectionBlockedError", reason: "configuration" });
++      expect(http.exchange).not.toHaveBeenCalled();
++    }),
++  );
++
++  it.effect("explains a key the host does not accept", () =>
++    Effect.gen(function* () {
++      const { native, gateway } = setup();
++      native.connect.mockRejectedValueOnce(
++        Object.assign(new Error("auth"), { code: "ERR_SSH_AUTH" }),
++      );
++      const ssh = yield* gateway;
++
++      const error = yield* Effect.flip(ssh.provision(TARGET));
++
++      expect(error).toMatchObject({ _tag: "ConnectionBlockedError", reason: "authentication" });
++    }),
++  );
++
++  it.effect("disconnect closes the session", () =>
++    Effect.gen(function* () {
++      const { native, gateway } = setup();
++      const ssh = yield* gateway;
++      yield* ssh.provision(TARGET);
++
++      yield* ssh.disconnect(TARGET);
++
++      expect(native.close).toHaveBeenCalledWith("session-1");
++    }),
++  );
++});
+diff --git a/apps/mobile/src/connection/ssh/gateway.ts b/apps/mobile/src/connection/ssh/gateway.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..1159bd7f8de74db9c9a42c3a8f13d4e37c91d278
+--- /dev/null
++++ b/apps/mobile/src/connection/ssh/gateway.ts
+@@ -0,0 +1,308 @@
++import {
++  bootstrapRemoteBearerSession,
++  fetchRemoteSessionState,
++} from "@t3tools/client-runtime/authorization";
++import {
++  ConnectionBlockedError,
++  ConnectionTransientError,
++  mapRemoteEnvironmentError,
++  sshTargetKey,
++} from "@t3tools/client-runtime/connection";
++import { fetchRemoteEnvironmentDescriptor } from "@t3tools/client-runtime/environment";
++import { ClientCapabilities } from "@t3tools/client-runtime/platform";
++import {
++  type AuthClientPresentationMetadata,
++  AuthStandardClientScopes,
++  type DesktopSshEnvironmentBootstrap,
++  type DesktopSshEnvironmentTarget,
++  type EnvironmentId,
++} from "@t3tools/contracts";
++import * as KeyedLock from "@t3tools/shared/KeyedLock";
++import {
++  buildRemoteLaunchScript,
++  buildRemotePairingScript,
++  decodeRemoteLaunchOutput,
++  decodeRemotePairingOutput,
++  REMOTE_ARCHIVE_LAUNCH_TIMEOUT_MS,
++  targetConnectionKey,
++} from "@t3tools/ssh/remoteScripts";
++import * as Effect from "effect/Effect";
++import { HttpClient } from "effect/http";
++
++import { type SshNative, sshErrorCode } from "./native";
++import { parseSshConfig, resolveSshHost } from "./sshConfig";
++
++/**
++ * The t3 release a host is given when it has no server running yet. The desktop passes its
++ * own version here; keep this in step with the server version this build is paired with.
++ */
++export const REMOTE_T3_VERSION = "0.1.2";
++
++export interface SshGatewayDependencies {
++  readonly native: SshNative;
++  readonly httpClient: HttpClient.HttpClient;
++  readonly clientMetadata: AuthClientPresentationMetadata;
++  readonly sha256Hex: (text: string) => Promise<string>;
++}
++
++interface Tunnel {
++  readonly sessionId: string;
++  readonly stateKey: string;
++  readonly httpBaseUrl: string;
++  readonly wsBaseUrl: string;
++  readonly remotePort: number;
++  readonly remoteServerKind: "external" | "managed" | undefined;
++}
++
++const runner = { archiveVersion: REMOTE_T3_VERSION };
++
++/**
++ * The desktop's SSH environment flow, over the app's own SSH connection: run the launch
++ * script, forward its port to this device's loopback, and pair through the forward. Host keys
++ * are trusted only from Settings or while adding the host, never during a reconnect.
++ */
++export const makeSshGateway = Effect.fn("mobile.ssh.makeGateway")(function* (
++  deps: SshGatewayDependencies,
++) {
++  const { native } = deps;
++  const tunnels = new Map<string, Tunnel>();
++  const locks = yield* KeyedLock.make<string>();
++
++  const call = <A>(operation: () => Promise<A>) =>
++    Effect.tryPromise({ try: operation, catch: nativeError });
++
++  const dropTunnel = (key: string) =>
++    Effect.suspend(() => {
++      const tunnel = tunnels.get(key);
++      tunnels.delete(key);
++      return tunnel === undefined
++        ? Effect.void
++        : Effect.promise(() => native.close(tunnel.sessionId).catch(() => undefined));
++    });
++
++  const openTunnel = Effect.fn("mobile.ssh.openTunnel")(function* (
++    target: DesktopSshEnvironmentTarget,
++  ) {
++    const configText = yield* call(() => native.readConfig());
++    const resolved = yield* Effect.try({
++      try: () => resolveSshHost(parseSshConfig(configText), target.alias),
++      catch: (cause) =>
++        new ConnectionBlockedError({
++          reason: "configuration",
++          detail: cause instanceof Error ? cause.message : String(cause),
++        }),
++    });
++    const connected = yield* call(() => native.connect(resolved.hops));
++    if (connected.status === "host-key-rejected") {
++      return yield* new ConnectionBlockedError({
++        reason: "authentication",
++        detail: connected.changed
++          ? `The SSH host key for ${connected.knownHostsName} changed. If that is expected, remove the old key in Settings > SSH, then add the environment again.`
++          : `${connected.knownHostsName} is not trusted yet. Add the environment again to review its SSH host key.`,
++        hop: "tunnel",
++      });
++    }
++    const sessionId = connected.sessionId;
++    return yield* Effect.gen(function* () {
++      const stateKey = (yield* call(() => deps.sha256Hex(targetConnectionKey(target)))).slice(
++        0,
++        16,
++      );
++      const launch = yield* call(() =>
++        native.exec(
++          sessionId,
++          `sh -l -s -- ${stateKey}`,
++          buildRemoteLaunchScript(runner),
++          REMOTE_ARCHIVE_LAUNCH_TIMEOUT_MS,
++        ),
++      );
++      if (launch.exitCode !== 0) {
++        return yield* remoteFailure("start T3 Code on the host", launch.stderr);
++      }
++      const started = yield* decodeRemoteLaunchOutput(launch.stdout).pipe(
++        Effect.mapError(() => remoteFailureError("start T3 Code on the host", launch.stdout)),
++      );
++      const localPort = yield* call(() => native.forward(sessionId, started.remotePort));
++      return {
++        sessionId,
++        stateKey,
++        httpBaseUrl: `http://127.0.0.1:${localPort}/`,
++        wsBaseUrl: `ws://127.0.0.1:${localPort}/`,
++        remotePort: started.remotePort,
++        remoteServerKind: started.serverKind,
++      } satisfies Tunnel;
++    }).pipe(
++      Effect.onError(() => Effect.promise(() => native.close(sessionId).catch(() => undefined))),
++    );
++  });
++
++  const ensure = (target: DesktopSshEnvironmentTarget, options: { issuePairingToken: boolean }) => {
++    const key = sshTargetKey(target);
++    return locks.withLock(
++      key,
++      Effect.gen(function* () {
++        let tunnel = tunnels.get(key);
++        if (tunnel !== undefined && !native.isOpen(tunnel.sessionId)) {
++          yield* dropTunnel(key);
++          tunnel = undefined;
++        }
++        if (tunnel === undefined) {
++          tunnel = yield* openTunnel(target);
++          tunnels.set(key, tunnel);
++        }
++        let pairingToken: string | null = null;
++        if (options.issuePairingToken) {
++          const { sessionId, stateKey } = tunnel;
++          const pairing = yield* call(() =>
++            native.exec(
++              sessionId,
++              "sh -s",
++              buildRemotePairingScript(stateKey, runner),
++              REMOTE_ARCHIVE_LAUNCH_TIMEOUT_MS,
++            ),
++          );
++          if (pairing.exitCode !== 0) {
++            return yield* remoteFailure("issue a pairing credential", pairing.stderr);
++          }
++          pairingToken = (yield* decodeRemotePairingOutput(pairing.stdout).pipe(
++            Effect.mapError(() => remoteFailureError("issue a pairing credential", pairing.stdout)),
++          )).credential;
++        }
++        return {
++          target,
++          httpBaseUrl: tunnel.httpBaseUrl,
++          wsBaseUrl: tunnel.wsBaseUrl,
++          pairingToken,
++          remotePort: tunnel.remotePort,
++          ...(tunnel.remoteServerKind === undefined
++            ? {}
++            : { remoteServerKind: tunnel.remoteServerKind }),
++        } satisfies DesktopSshEnvironmentBootstrap;
++      }),
++    );
++  };
++
++  const describe = Effect.fn("mobile.ssh.describe")(function* (
++    httpBaseUrl: string,
++    target: DesktopSshEnvironmentTarget,
++    expected?: EnvironmentId,
++  ) {
++    const descriptor = yield* fetchRemoteEnvironmentDescriptor({ httpBaseUrl }).pipe(
++      Effect.mapError((error) => mapRemoteEnvironmentError(error)),
++    );
++    if (expected !== undefined && descriptor.environmentId !== expected) {
++      return yield* new ConnectionBlockedError({
++        reason: "configuration",
++        detail: `${target.alias} reaches ${descriptor.label}, a different machine. Add it as its own environment instead.`,
++      });
++    }
++    return descriptor;
++  });
++
++  const provision = Effect.fn("mobile.ssh.provision")(function* (
++    target: DesktopSshEnvironmentTarget,
++    expectedEnvironmentId?: EnvironmentId,
++  ) {
++    const bootstrap = yield* ensure(target, { issuePairingToken: true });
++    const credential = bootstrap.pairingToken;
++    if (credential === null) {
++      return yield* remoteFailure("issue a pairing credential", "");
++    }
++    const descriptor = yield* describe(bootstrap.httpBaseUrl, target, expectedEnvironmentId);
++    const access = yield* bootstrapRemoteBearerSession({
++      httpBaseUrl: bootstrap.httpBaseUrl,
++      credential,
++      clientMetadata: deps.clientMetadata,
++    }).pipe(Effect.mapError((error) => mapRemoteEnvironmentError(error)));
++    return {
++      environmentId: descriptor.environmentId,
++      label: descriptor.label,
++      bootstrap,
++      bearerToken: access.access_token,
++    };
++  });
++
++  // Every pairing adds a session on the host, so a saved token is kept while the host still
++  // grants it every standard scope.
++  const prepare = Effect.fn("mobile.ssh.prepare")(function* (input: {
++    readonly connectionId: string;
++    readonly expectedEnvironmentId: EnvironmentId;
++    readonly target: DesktopSshEnvironmentTarget;
++    readonly bearerToken?: string;
++  }) {
++    const bearerToken = input.bearerToken;
++    if (bearerToken !== undefined) {
++      const bootstrap = yield* ensure(input.target, { issuePairingToken: false });
++      yield* describe(bootstrap.httpBaseUrl, input.target, input.expectedEnvironmentId);
++      const session = yield* fetchRemoteSessionState({
++        httpBaseUrl: bootstrap.httpBaseUrl,
++        bearerToken,
++      }).pipe(Effect.mapError((error) => mapRemoteEnvironmentError(error)));
++      const granted = session.permissions ?? session.scopes ?? [];
++      if (
++        session.authenticated &&
++        AuthStandardClientScopes.every((scope) => granted.includes(scope))
++      ) {
++        return { bootstrap, bearerToken };
++      }
++    }
++    const provisioned = yield* provision(input.target, input.expectedEnvironmentId);
++    return { bootstrap: provisioned.bootstrap, bearerToken: provisioned.bearerToken };
++  });
++
++  // A failure after the tunnel opened may mean the host's server moved or stopped, so the next
++  // attempt starts over instead of reusing a forward to a dead port.
++  const resetOnFailure =
++    (target: DesktopSshEnvironmentTarget) =>
++    <A, E>(effect: Effect.Effect<A, E, HttpClient.HttpClient>) =>
++      effect.pipe(
++        Effect.onError(() => dropTunnel(sshTargetKey(target))),
++        Effect.provideService(HttpClient.HttpClient, deps.httpClient),
++      );
++
++  return ClientCapabilities.SshEnvironmentGateway.of({
++    provision: (target, expectedEnvironmentId) =>
++      provision(target, expectedEnvironmentId).pipe(resetOnFailure(target)),
++    prepare: (input) => prepare(input).pipe(resetOnFailure(input.target)),
++    disconnect: (target) => dropTunnel(sshTargetKey(target)),
++  });
++});
++
++function nativeError(cause: unknown) {
++  const message = cause instanceof Error ? cause.message : String(cause);
++  switch (sshErrorCode(cause)) {
++    case "ERR_SSH_AUTH":
++      return new ConnectionBlockedError({
++        reason: "authentication",
++        detail:
++          "The host did not accept this device's SSH key. Add the key from Settings > SSH to its authorized_keys.",
++        hop: "tunnel",
++      });
++    case "ERR_SSH_NO_KEY":
++      return new ConnectionBlockedError({
++        reason: "configuration",
++        detail: "Create an SSH key in Settings > SSH first.",
++        hop: "device",
++      });
++    case "ERR_SSH_UNREACHABLE":
++      return new ConnectionTransientError({ reason: "network", detail: message, hop: "tunnel" });
++    default:
++      return new ConnectionTransientError({
++        reason: "remote-unavailable",
++        detail: `Could not prepare the SSH environment: ${message}`,
++        hop: "tunnel",
++      });
++  }
++}
++
++function remoteFailureError(action: string, output: string) {
++  const tail = output.trim().split("\n").slice(-3).join("\n");
++  return new ConnectionTransientError({
++    reason: "remote-unavailable",
++    detail: `Could not ${action}${tail === "" ? "." : `: ${tail}`}`,
++    hop: "server",
++  });
++}
++
++const remoteFailure = (action: string, output: string) =>
++  Effect.fail(remoteFailureError(action, output));
+diff --git a/apps/mobile/src/connection/ssh/hostKeys.test.ts b/apps/mobile/src/connection/ssh/hostKeys.test.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..d0055b0fa1b2fe060e2bca763ee6e44cf91d7c8c
+--- /dev/null
++++ b/apps/mobile/src/connection/ssh/hostKeys.test.ts
+@@ -0,0 +1,70 @@
++import { describe, expect, it, vi } from "vite-plus/test";
++
++import { reviewHostKeys, SshHostKeyChangedError } from "./hostKeys";
++import type { SshConnectResult, SshHop, SshHostKeyRejection, SshNative } from "./native";
++
++const HOPS: ReadonlyArray<SshHop> = [
++  { host: "jump.example", port: 22, user: "me", hostKeyAlias: null },
++  { host: "127.0.0.1", port: 2222, user: "dev", hostKeyAlias: "box" },
++];
++
++function rejection(name: string, changed = false): SshHostKeyRejection {
++  return {
++    status: "host-key-rejected",
++    host: name,
++    port: 22,
++    knownHostsName: name,
++    keyType: "ssh-ed25519",
++    fingerprint: `SHA256:${name}`,
++    knownHostsLine: `${name} ssh-ed25519 AAAA`,
++    changed,
++  };
++}
++
++function fakeNative(results: ReadonlyArray<SshConnectResult>) {
++  const queue = [...results];
++  const native = {
++    connect: vi.fn(async () => queue.shift() ?? { status: "connected" as const, sessionId: "s" }),
++    trustHostKey: vi.fn(async (_line: string) => undefined),
++    close: vi.fn(async (_id: string) => undefined),
++  };
++  return native as typeof native & SshNative;
++}
++
++describe("reviewHostKeys", () => {
++  it("asks about each new hop in order, then closes the check connection", async () => {
++    const native = fakeNative([rejection("jump.example"), rejection("box")]);
++    const asked: string[] = [];
++
++    const trusted = await reviewHostKeys(native, HOPS, async (key) => {
++      asked.push(key.knownHostsName);
++      return true;
++    });
++
++    expect(trusted).toBe(true);
++    expect(asked).toEqual(["jump.example", "box"]);
++    expect(native.trustHostKey.mock.calls).toEqual([
++      ["jump.example ssh-ed25519 AAAA"],
++      ["box ssh-ed25519 AAAA"],
++    ]);
++    expect(native.close).toHaveBeenCalledWith("s");
++  });
++
++  it("trusts nothing when the user declines", async () => {
++    const native = fakeNative([rejection("jump.example")]);
++
++    expect(await reviewHostKeys(native, HOPS, async () => false)).toBe(false);
++    expect(native.trustHostKey).not.toHaveBeenCalled();
++  });
++
++  it("never offers a changed key for trust", async () => {
++    const native = fakeNative([rejection("box", true)]);
++    const confirm = vi.fn(async () => true);
++
++    await expect(reviewHostKeys(native, HOPS, confirm)).rejects.toBeInstanceOf(
++      SshHostKeyChangedError,
++    );
++    expect(confirm).not.toHaveBeenCalled();
++    expect(native.trustHostKey).not.toHaveBeenCalled();
++  });
++});
+diff --git a/apps/mobile/src/connection/ssh/hostKeys.ts b/apps/mobile/src/connection/ssh/hostKeys.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..d6d831779080ecd55cd8a8a418b18cba355d9861
+--- /dev/null
++++ b/apps/mobile/src/connection/ssh/hostKeys.ts
+@@ -0,0 +1,34 @@
++import type { SshHop, SshHostKeyRejection, SshNative } from "./native";
++
++export class SshHostKeyChangedError extends Error {
++  constructor(readonly rejection: SshHostKeyRejection) {
++    super(
++      `The SSH host key for ${rejection.knownHostsName} changed. If that is expected, remove the old key in Settings > SSH and try again.`,
++    );
++  }
++}
++
++/**
++ * Connects once to check every hop's host key, asking before trusting one it has not seen.
++ * A key that differs from the trusted one is never offered for trust here. Resolves false if
++ * the user declines; signing in with the device key happens on the same connection, so a key
++ * the host does not accept rejects with `ERR_SSH_AUTH`.
++ */
++export async function reviewHostKeys(
++  native: SshNative,
++  hops: ReadonlyArray<SshHop>,
++  confirmTrust: (rejection: SshHostKeyRejection) => Promise<boolean>,
++): Promise<boolean> {
++  // Each pass gets one hop further, so this is bounded by the number of hops.
++  for (let pass = 0; pass <= hops.length; pass++) {
++    const result = await native.connect(hops);
++    if (result.status === "connected") {
++      await native.close(result.sessionId);
++      return true;
++    }
++    if (result.changed) throw new SshHostKeyChangedError(result);
++    if (!(await confirmTrust(result))) return false;
++    await native.trustHostKey(result.knownHostsLine);
++  }
++  throw new Error("The SSH host keys did not settle; try again.");
++}
+diff --git a/apps/mobile/src/connection/ssh/native.ts b/apps/mobile/src/connection/ssh/native.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..3d8b3451a2804197b18ebc457501ece9e9f7c7d8
+--- /dev/null
++++ b/apps/mobile/src/connection/ssh/native.ts
+@@ -0,0 +1,76 @@
++import { requireOptionalNativeModule } from "expo";
++
++export interface SshPublicKey {
++  readonly line: string;
++  readonly fingerprint: string;
++}
++
++export interface SshKnownHost {
++  readonly line: string;
++  readonly names: ReadonlyArray<string>;
++  readonly keyType: string;
++  readonly fingerprint: string;
++}
++
++export interface SshHop {
++  readonly host: string;
++  readonly port: number;
++  readonly user: string;
++  readonly hostKeyAlias: string | null;
++}
++
++export interface SshHostKeyRejection {
++  readonly status: "host-key-rejected";
++  readonly host: string;
++  readonly port: number;
++  readonly knownHostsName: string;
++  readonly keyType: string;
++  readonly fingerprint: string;
++  readonly knownHostsLine: string;
++  /** known_hosts already holds a different key under this name. */
++  readonly changed: boolean;
++}
++
++export type SshConnectResult =
++  | { readonly status: "connected"; readonly sessionId: string }
++  | SshHostKeyRejection;
++
++export interface SshExecResult {
++  readonly exitCode: number | null;
++  readonly stdout: string;
++  readonly stderr: string;
++}
++
++/** `modules/t3-ssh`. The private key stays native; failures reject with an `ERR_SSH_*` code. */
++export interface SshNative {
++  getPublicKey(): Promise<SshPublicKey | null>;
++  createKey(comment: string): Promise<SshPublicKey>;
++  deleteKey(): Promise<void>;
++  readConfig(): Promise<string>;
++  writeConfig(text: string): Promise<void>;
++  listKnownHosts(): Promise<ReadonlyArray<SshKnownHost>>;
++  trustHostKey(line: string): Promise<void>;
++  forgetHostKey(line: string): Promise<void>;
++  connect(hops: ReadonlyArray<SshHop>): Promise<SshConnectResult>;
++  exec(
++    sessionId: string,
++    command: string,
++    stdin: string,
++    timeoutMs: number,
++  ): Promise<SshExecResult>;
++  forward(sessionId: string, remotePort: number): Promise<number>;
++  isOpen(sessionId: string): boolean;
++  close(sessionId: string): Promise<void>;
++}
++
++/** Null where the platform has no SSH module (iOS). */
++export const sshNative = requireOptionalNativeModule<SshNative>("T3Ssh");
++
++export function sshErrorCode(cause: unknown): string | null {
++  return typeof cause === "object" &&
++    cause !== null &&
++    "code" in cause &&
++    typeof cause.code === "string"
++    ? cause.code
++    : null;
++}
+diff --git a/apps/mobile/src/connection/ssh/sshConfig.test.ts b/apps/mobile/src/connection/ssh/sshConfig.test.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..d671bf9133695bda3e6bc81c132a6213948f920f
+--- /dev/null
++++ b/apps/mobile/src/connection/ssh/sshConfig.test.ts
+@@ -0,0 +1,109 @@
++import { describe, expect, it } from "vite-plus/test";
++
++import { parseSshConfig, resolveSshHost } from "./sshConfig";
++
++const BOX = `
++# The research box: the host's sshd, then the container's on its loopback.
++Host slop
++  HostName slop.example
++  User nicky
++
++Host slop-box
++  HostName 127.0.0.1
++  Port 2222
++  User dev
++  HostKeyAlias slop-box
++  ProxyJump slop
++  ForwardAgent no
++`;
++
++describe("parseSshConfig / resolveSshHost", () => {
++  it("resolves a ProxyJump chain, jump host first", () => {
++    expect(resolveSshHost(parseSshConfig(BOX), "slop-box")).toEqual({
++      hops: [
++        { host: "slop.example", port: 22, user: "nicky", hostKeyAlias: null },
++        { host: "127.0.0.1", port: 2222, user: "dev", hostKeyAlias: "slop-box" },
++      ],
++      target: { alias: "slop-box", hostname: "127.0.0.1", username: "dev", port: 2222 },
++    });
++  });
++
++  it("follows a jump host's own ProxyJump and literal user@host:port jumps", () => {
++    const config = parseSshConfig(`
++Host inner
++  User root
++  ProxyJump outer,ops@[2001:db8::1]:2200
++Host outer
++  HostName outer.example
++  User me
++  ProxyJump gate@gate.example
++`);
++
++    expect(resolveSshHost(config, "inner").hops).toEqual([
++      { host: "gate.example", port: 22, user: "gate", hostKeyAlias: null },
++      { host: "outer.example", port: 22, user: "me", hostKeyAlias: null },
++      { host: "2001:db8::1", port: 2200, user: "ops", hostKeyAlias: null },
++      { host: "inner", port: 22, user: "root", hostKeyAlias: null },
++    ]);
++  });
++
++  it("keeps the first value for a setting, as OpenSSH does", () => {
++    const config = parseSshConfig(`
++Host a b
++  User first
++Host a
++  User second
++  Port=2200
++`);
++
++    expect(resolveSshHost(config, "a").target).toEqual({
++      alias: "a",
++      hostname: "a",
++      username: "first",
++      port: 2200,
++    });
++    expect(resolveSshHost(config, "b").target.username).toBe("first");
++  });
++
++  it("ignores pattern and Match blocks and says so", () => {
++    const config = parseSshConfig(`
++Host *
++  User everyone
++Host box
++  HostName box.example
++Match host box
++  User matched
++`);
++
++    expect(config.problems).toHaveLength(2);
++    expect(() => resolveSshHost(config, "box")).toThrow("Add a User line for box.");
++  });
++
++  it("reports unusable configurations", () => {
++    const config = parseSshConfig(`
++Host loop-a
++  User u
++  ProxyJump loop-b
++Host loop-b
++  User u
++  ProxyJump loop-a
++Host bad-port
++  User u
++  Port 99999
++  ProxyCommand nc %h %p
++`);
++
++    expect(() => resolveSshHost(config, "loop-a")).toThrow("ProxyJump loops back to loop-a.");
++    expect(() => resolveSshHost(config, "missing")).toThrow("No Host missing in the SSH config.");
++    expect(config.problems).toEqual([
++      'Line 10: "99999" is not a port.',
++      "Line 11: ProxyCommand is not supported; use ProxyJump.",
++    ]);
++  });
++
++  it("treats ProxyJump none as a direct connection", () => {
++    const config = parseSshConfig("Host direct\n  User u\n  ProxyJump none\n");
++
++    expect(resolveSshHost(config, "direct").hops).toHaveLength(1);
++  });
++});
+diff --git a/apps/mobile/src/connection/ssh/sshConfig.ts b/apps/mobile/src/connection/ssh/sshConfig.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..b60138a57e04c52d487204ccdbf4a35c900bdabd
+--- /dev/null
++++ b/apps/mobile/src/connection/ssh/sshConfig.ts
+@@ -0,0 +1,167 @@
++import type { DesktopSshEnvironmentTarget } from "@t3tools/contracts";
++
++import type { SshHop } from "./native";
++
++/**
++ * The part of ssh_config(5) the app understands: literal `Host` blocks with HostName, User,
++ * Port, ProxyJump and HostKeyAlias. As in OpenSSH, the first value found for a setting wins.
++ * Anything else is ignored, and the settings that would change where a connection goes are
++ * reported so the user is not surprised.
++ */
++export interface SshConfigHost {
++  readonly alias: string;
++  readonly hostname: string | null;
++  readonly user: string | null;
++  readonly port: number | null;
++  readonly proxyJump: ReadonlyArray<string> | null;
++  readonly hostKeyAlias: string | null;
++}
++
++export interface SshConfig {
++  readonly hosts: ReadonlyArray<SshConfigHost>;
++  readonly problems: ReadonlyArray<string>;
++}
++
++export interface ResolvedSshHost {
++  readonly hops: ReadonlyArray<SshHop>;
++  readonly target: DesktopSshEnvironmentTarget;
++}
++
++const MAX_HOPS = 8;
++const UNSUPPORTED = new Map([
++  ["match", "Match blocks are not supported; their settings are ignored."],
++  ["include", "Include is not supported."],
++  ["proxycommand", "ProxyCommand is not supported; use ProxyJump."],
++]);
++
++type MutableHost = { -readonly [K in keyof SshConfigHost]: SshConfigHost[K] };
++
++export function parseSshConfig(text: string): SshConfig {
++  const hosts = new Map<string, MutableHost>();
++  const problems: string[] = [];
++  // null while outside a literal Host block (before the first one, or in `Host *` / Match).
++  let current: MutableHost[] | null = null;
++
++  for (const [index, raw] of text.split(/\r?\n/u).entries()) {
++    const line = raw.trim();
++    if (line === "" || line.startsWith("#")) continue;
++    const match = /^(\S+?)(?:\s*=\s*|\s+)(.*)$/u.exec(line);
++    const keyword = (match?.[1] ?? line).toLowerCase();
++    const value = (match?.[2] ?? "").trim();
++    const where = `Line ${index + 1}`;
++
++    if (keyword === "host") {
++      const names = value.split(/\s+/u).filter((name) => name !== "");
++      const literal = names.filter((name) => !/[*?!]/u.test(name));
++      if (literal.length < names.length) {
++        problems.push(`${where}: patterns like "${names.join(" ")}" are ignored; name each host.`);
++      }
++      current = literal.map((alias) => {
++        const existing = hosts.get(alias);
++        if (existing) return existing;
++        const created: MutableHost = {
++          alias,
++          hostname: null,
++          user: null,
++          port: null,
++          proxyJump: null,
++          hostKeyAlias: null,
++        };
++        hosts.set(alias, created);
++        return created;
++      });
++      continue;
++    }
++    const unsupported = UNSUPPORTED.get(keyword);
++    if (unsupported !== undefined) {
++      problems.push(`${where}: ${unsupported}`);
++      if (keyword === "match") current = null;
++      continue;
++    }
++    if (current === null) continue;
++    for (const host of current) applySetting(host, keyword, value, where, problems);
++  }
++  return { hosts: [...hosts.values()], problems };
++}
++
++function applySetting(
++  host: MutableHost,
++  keyword: string,
++  value: string,
++  where: string,
++  problems: string[],
++) {
++  switch (keyword) {
++    case "hostname":
++      host.hostname ??= value;
++      return;
++    case "user":
++      host.user ??= value;
++      return;
++    case "hostkeyalias":
++      host.hostKeyAlias ??= value;
++      return;
++    case "port": {
++      const port = Number(value);
++      if (!Number.isInteger(port) || port < 1 || port > 65_535) {
++        problems.push(`${where}: "${value}" is not a port.`);
++        return;
++      }
++      host.port ??= port;
++      return;
++    }
++    case "proxyjump":
++      host.proxyJump ??=
++        value.toLowerCase() === "none" ? [] : value.split(",").map((jump) => jump.trim());
++      return;
++  }
++}
++
++/** The hops to reach `alias`, jump hosts first, following each jump host's own ProxyJump. */
++export function resolveSshHost(config: SshConfig, alias: string): ResolvedSshHost {
++  const byAlias = new Map(config.hosts.map((host) => [host.alias, host]));
++  const hops: SshHop[] = [];
++
++  const visit = (name: string, chain: ReadonlyArray<string>) => {
++    if (chain.includes(name)) {
++      throw new Error(`ProxyJump loops back to ${name}.`);
++    }
++    const host = byAlias.get(name) ?? literalHost(name);
++    for (const jump of host.proxyJump ?? []) visit(jump, [...chain, name]);
++    if (hops.length >= MAX_HOPS) throw new Error(`${alias} needs more than ${MAX_HOPS} hops.`);
++    if (host.user === null || host.user === "") {
++      throw new Error(`Add a User line for ${host.alias}.`);
++    }
++    hops.push({
++      host: host.hostname ?? host.alias,
++      port: host.port ?? 22,
++      user: host.user,
++      hostKeyAlias: host.hostKeyAlias,
++    });
++  };
++
++  if (!byAlias.has(alias)) throw new Error(`No Host ${alias} in the SSH config.`);
++  visit(alias, []);
++  const last = hops[hops.length - 1];
++  if (last === undefined) throw new Error(`No Host ${alias} in the SSH config.`);
++  return {
++    hops,
++    target: { alias, hostname: last.host, username: last.user, port: last.port },
++  };
++}
++
++/** A ProxyJump entry that names no Host block: `[user@]host[:port]`, IPv6 in brackets. */
++function literalHost(spec: string): SshConfigHost {
++  const match = /^(?:([^@]+)@)?(?:\[([^\]]+)\]|([^:]+))(?::(\d+))?$/u.exec(spec);
++  if (match === null)
++    throw new Error(`"${spec}" is neither a Host in the config nor user@host:port.`);
++  const port = match[4] === undefined ? null : Number(match[4]);
++  return {
++    alias: spec,
++    hostname: match[2] ?? match[3] ?? spec,
++    user: match[1] ?? null,
++    port,
++    proxyJump: null,
++    hostKeyAlias: null,
++  };
++}

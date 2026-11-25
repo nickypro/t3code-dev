@@ -1,0 +1,119 @@
+diff --git a/apps/mobile/src/features/connection/ConnectionsNewRouteScreen.test.tsx b/apps/mobile/src/features/connection/ConnectionsNewRouteScreen.test.tsx
+index b0d78ef3acbce4dbbaaa9769abfe1c6197290745..c92f37a6bf77bc78a2c05629f0096ee33c4efe82 100644
+--- a/apps/mobile/src/features/connection/ConnectionsNewRouteScreen.test.tsx
++++ b/apps/mobile/src/features/connection/ConnectionsNewRouteScreen.test.tsx
+@@ -79,6 +79,7 @@ vi.mock("../layout/workspace/workspace-selection-store", () => ({
+ }));
+ vi.mock("../cloud/publicConfig", () => ({ hasCloudPublicConfig: () => false }));
+ vi.mock("./CloudEnvironmentRows", () => ({ CloudEnvironmentRows: () => null }));
++vi.mock("./SshEnvironmentSection", () => ({ SshEnvironmentSection: () => null }));
+ vi.mock("./environmentSections", () => ({
+   splitEnvironmentSections: () => ({ connectedCloudEnvironments: [] }),
+ }));
+diff --git a/apps/mobile/src/features/connection/SshEnvironmentSection.tsx b/apps/mobile/src/features/connection/SshEnvironmentSection.tsx
+index 235619c7198a6504350823fa121f12f158943062..e67255f6a301b81a3611a3d1a07b717d9ecdf5f3 100644
+--- a/apps/mobile/src/features/connection/SshEnvironmentSection.tsx
++++ b/apps/mobile/src/features/connection/SshEnvironmentSection.tsx
+@@ -56,6 +56,14 @@ function SshHosts(props: { readonly native: SshNative; readonly onConnected: ()
+ 
+   const openSettings = () => navigation.navigate("SettingsSsh");
+ 
++  /** Resolves to null once connected, "cancelled" if a host key was declined, or why it failed. */
++  const connectHost = async (alias: string) => {
++    const resolved = resolveSshHost(config, alias);
++    if (!(await reviewHostKeys(native, resolved.hops, confirmHostKey))) return "cancelled";
++    const result = await connectSsh({ target: resolved.target });
++    return AsyncResult.isSuccess(result) ? null : sshFailureMessage(Cause.squash(result.cause));
++  };
++
+   const connect = async (alias: string) => {
+     if (!hasKey) {
+       Dialog.alert("Create an SSH key first", "Then add its public key to the host.", [
+@@ -65,26 +73,16 @@ function SshHosts(props: { readonly native: SshNative; readonly onConnected: ()
+       return;
+     }
+     setConnecting(alias);
+-    try {
+-      const resolved = resolveSshHost(config, alias);
+-      if (!(await reviewHostKeys(native, resolved.hops, confirmHostKey))) return;
+-      const result = await connectSsh({ target: resolved.target });
+-      void Haptics.notificationAsync(
+-        AsyncResult.isSuccess(result)
+-          ? Haptics.NotificationFeedbackType.Success
+-          : Haptics.NotificationFeedbackType.Error,
+-      );
+-      if (AsyncResult.isSuccess(result)) {
+-        onConnected();
+-      } else {
+-        Dialog.alert("Could not connect", sshFailureMessage(Cause.squash(result.cause)));
+-      }
+-    } catch (error) {
+-      void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error);
+-      Dialog.alert("Could not connect", sshFailureMessage(error));
+-    } finally {
+-      setConnecting(null);
+-    }
++    const failure = await connectHost(alias).catch((error: unknown) => sshFailureMessage(error));
++    setConnecting(null);
++    if (failure === "cancelled") return;
++    void Haptics.notificationAsync(
++      failure === null
++        ? Haptics.NotificationFeedbackType.Success
++        : Haptics.NotificationFeedbackType.Error,
++    );
++    if (failure === null) onConnected();
++    else Dialog.alert("Could not connect", failure);
+   };
+ 
+   return (
+diff --git a/apps/mobile/src/features/settings/SettingsSshRouteScreen.tsx b/apps/mobile/src/features/settings/SettingsSshRouteScreen.tsx
+index 91006763d6de8ce02db301aa71c8d14c44870f1d..3815cd4b9aa39e951ec5a29ecda73cfa2c4046d6 100644
+--- a/apps/mobile/src/features/settings/SettingsSshRouteScreen.tsx
++++ b/apps/mobile/src/features/settings/SettingsSshRouteScreen.tsx
+@@ -1,6 +1,6 @@
+ import * as Clipboard from "expo-clipboard";
+ import * as Haptics from "expo-haptics";
+-import { useCallback, useEffect, useMemo, useState } from "react";
++import { useEffect, useMemo, useState } from "react";
+ import { Share, View } from "react-native";
+ import { useSafeAreaInsets } from "react-native-safe-area-context";
+ 
+@@ -52,17 +52,13 @@ function SshSettings({ native }: { readonly native: SshNative }) {
+   const [busy, setBusy] = useState<"key" | "config" | null>(null);
+   const problems = useMemo(() => parseSshConfig(config).problems, [config]);
+ 
+-  const run = useCallback(async (kind: "key" | "config" | null, action: () => Promise<void>) => {
++  const run = async (kind: "key" | "config" | null, action: () => Promise<void>) => {
+     setBusy(kind);
+-    try {
+-      await action();
+-    } catch (error) {
+-      Dialog.alert("SSH", sshFailureMessage(error));
+-    } finally {
+-      setBusy(null);
+-    }
+-  }, []);
++    await action().catch((error: unknown) => Dialog.alert("SSH", sshFailureMessage(error)));
++    setBusy(null);
++  };
+ 
++  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- loads the key, config and host keys the native SSH module stores
+   useEffect(() => {
+     let live = true;
+     Promise.all([native.getPublicKey(), native.readConfig(), native.listKnownHosts()]).then(
+diff --git a/packages/ssh/src/remoteScripts.ts b/packages/ssh/src/remoteScripts.ts
+index c89ac3cd7dda8811a2efc86856c4921faf6b16be..a6bf8b44cf4bb62618f24b8bbe24acf32c8e3caa 100644
+--- a/packages/ssh/src/remoteScripts.ts
++++ b/packages/ssh/src/remoteScripts.ts
+@@ -1,9 +1,6 @@
+ /**
+- * The remote side of SSH environments: the shell scripts a client runs on the
+- * host to start or reuse a t3 server and to issue a pairing credential, and the
+- * decoders for what they print. Free of Node and process APIs so any client
+- * that can open an SSH exec channel (desktop through `ssh`, Android natively)
+- * runs the same scripts.
++ * Scripts a client runs over SSH to start or reuse a t3 server and issue a pairing credential,
++ * plus decoders for their output. Node-free, so Android's native SSH client shares them.
+  */
+ import {
+   DESKTOP_UPDATE_IN_PROGRESS_MARKER_FILE,

@@ -1,0 +1,113 @@
+diff --git a/apps/mobile/modules/t3-ssh/android/build.gradle b/apps/mobile/modules/t3-ssh/android/build.gradle
+index ca7dbf398eeab78a132b53810104c46ec6809c34..1534aa51a2aeb8be089dad948634cecf582a85b1 100644
+--- a/apps/mobile/modules/t3-ssh/android/build.gradle
++++ b/apps/mobile/modules/t3-ssh/android/build.gradle
+@@ -36,6 +36,9 @@ tasks.withType(Test).configureEach {
+   javaLauncher = javaToolchains.launcherFor {
+     languageVersion = JavaLanguageVersion.of(21)
+   }
++  // On Android InetAddress.getLoopbackAddress() is ::1. Preferring IPv6 makes the JVM agree,
++  // so the tests see the loopback the app gets.
++  systemProperty 'java.net.preferIPv6Addresses', 'true'
+   // The end-to-end test runs only when given the scripts and archive to use.
+   ['T3_SSH_E2E_SCRIPTS', 'T3_SSH_E2E_HOME'].each { name ->
+     def value = System.getenv(name)
+diff --git a/apps/mobile/modules/t3-ssh/android/src/main/java/expo/modules/t3ssh/SshSession.kt b/apps/mobile/modules/t3-ssh/android/src/main/java/expo/modules/t3ssh/SshSession.kt
+index 73030262c21ab92b35b2d1770b2f5fb3ccf1f1a1..5eaa852a845a8d39ad5eb5a3e3defccd50b716ef 100644
+--- a/apps/mobile/modules/t3-ssh/android/src/main/java/expo/modules/t3ssh/SshSession.kt
++++ b/apps/mobile/modules/t3-ssh/android/src/main/java/expo/modules/t3ssh/SshSession.kt
+@@ -94,7 +94,7 @@ class SshSession private constructor(private val clients: List<SSHClient>) : Clo
+ 
+   /** Forwards a new loopback port on this device to `127.0.0.1:remotePort` on the target. */
+   fun forward(remotePort: Int): Int {
+-    val server = ServerSocket(0, BACKLOG, InetAddress.getLoopbackAddress())
++    val server = ServerSocket(0, BACKLOG, LOOPBACK_ADDRESS)
+     listeners += server
+     if (!isOpen) {
+       closeQuietly(server)
+@@ -143,6 +143,10 @@ class SshSession private constructor(private val clients: List<SSHClient>) : Clo
+ 
+   companion object {
+     private const val LOOPBACK = "127.0.0.1"
++
++    // Not getLoopbackAddress(): on Android that is ::1, which the http://127.0.0.1 URLs the app
++    // builds for a forward would never reach.
++    private val LOOPBACK_ADDRESS = InetAddress.getByAddress(byteArrayOf(127, 0, 0, 1))
+     private const val BACKLOG = 50
+ 
+     fun connect(
+diff --git a/apps/mobile/modules/t3-ssh/android/src/test/java/expo/modules/t3ssh/SshSessionTest.kt b/apps/mobile/modules/t3-ssh/android/src/test/java/expo/modules/t3ssh/SshSessionTest.kt
+index 8d7a75c8862e5a4ab9fba02378dd75b41bc43603..9ab4c94033e0c28423589b1a0f9c685783c8292d 100644
+--- a/apps/mobile/modules/t3-ssh/android/src/test/java/expo/modules/t3ssh/SshSessionTest.kt
++++ b/apps/mobile/modules/t3-ssh/android/src/test/java/expo/modules/t3ssh/SshSessionTest.kt
+@@ -240,7 +240,7 @@ class SshSessionTest {
+   }
+ 
+   private fun refusesConnections(port: Int): Boolean = try {
+-    Socket(InetAddress.getLoopbackAddress(), port).use { false }
++    Socket(LOCALHOST, port).use { false }
+   } catch (_: IOException) {
+     true
+   }
+diff --git a/apps/mobile/modules/t3-ssh/android/src/test/java/expo/modules/t3ssh/TestServers.kt b/apps/mobile/modules/t3-ssh/android/src/test/java/expo/modules/t3ssh/TestServers.kt
+index 1351e252e9aa90b51e36ca283760be612c60fb23..be857ff78dd591d8dfca2cb905011847d34dc523 100644
+--- a/apps/mobile/modules/t3-ssh/android/src/test/java/expo/modules/t3ssh/TestServers.kt
++++ b/apps/mobile/modules/t3-ssh/android/src/test/java/expo/modules/t3ssh/TestServers.kt
+@@ -11,6 +11,12 @@ import java.util.concurrent.CopyOnWriteArrayList
+ import java.util.concurrent.TimeUnit
+ import kotlin.concurrent.thread
+ 
++/**
++ * IPv4 loopback, spelled out: with IPv6 preferred (as on Android) getLoopbackAddress() is ::1,
++ * and the servers and the app's URLs use 127.0.0.1.
++ */
++val LOCALHOST: InetAddress = InetAddress.getByAddress(byteArrayOf(127, 0, 0, 1))
++
+ /** A throwaway OpenSSH server on loopback, configured and owned by one test. */
+ class TestSshd(
+   private val dir: File,
+@@ -85,7 +91,7 @@ class TestSshd(
+  * bytes, which is what a dropped mobile network looks like to both ends.
+  */
+ class TcpRelay(private val targetPort: Int) : Closeable {
+-  private val server = ServerSocket(0, 50, InetAddress.getLoopbackAddress())
++  private val server = ServerSocket(0, 50, LOCALHOST)
+   private val sockets = CopyOnWriteArrayList<Socket>()
+ 
+   @Volatile private var flowing = true
+@@ -100,7 +106,7 @@ class TcpRelay(private val targetPort: Int) : Closeable {
+         } catch (_: IOException) {
+           break
+         }
+-        val upstream = Socket(InetAddress.getLoopbackAddress(), targetPort)
++        val upstream = Socket(LOCALHOST, targetPort)
+         sockets += client
+         sockets += upstream
+         pump(client, upstream)
+@@ -136,7 +142,7 @@ class TcpRelay(private val targetPort: Int) : Closeable {
+ 
+ /** Answers every HTTP request on loopback with one fixed body, then closes the connection. */
+ class TestHttpService(body: String) : Closeable {
+-  private val server = ServerSocket(0, 50, InetAddress.getLoopbackAddress())
++  private val server = ServerSocket(0, 50, LOCALHOST)
+   private val response = body.toByteArray().let { bytes ->
+     "HTTP/1.1 200 OK\r\nContent-Length: ${bytes.size}\r\nConnection: close\r\n\r\n".toByteArray() +
+       bytes
+@@ -168,7 +174,7 @@ class TestHttpService(body: String) : Closeable {
+   override fun close() = server.close()
+ }
+ 
+-fun freeLoopbackPort(): Int = ServerSocket(0, 1, InetAddress.getLoopbackAddress()).use {
++fun freeLoopbackPort(): Int = ServerSocket(0, 1, LOCALHOST).use {
+   it.localPort
+ }
+ 
+@@ -186,7 +192,7 @@ fun awaitListening(port: Int, ceilingMs: Long = 10_000, stillStarting: () -> Uni
+   while (true) {
+     stillStarting()
+     try {
+-      Socket().use { it.connect(InetSocketAddress(InetAddress.getLoopbackAddress(), port), 200) }
++      Socket().use { it.connect(InetSocketAddress(LOCALHOST, port), 200) }
+       return
+     } catch (_: IOException) {
+       check(System.nanoTime() < deadline) { "Nothing listened on $port within ${ceilingMs}ms." }

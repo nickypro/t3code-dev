@@ -1,0 +1,535 @@
+diff --git a/apps/mobile/src/Stack.tsx b/apps/mobile/src/Stack.tsx
+index 38692acbca128a7f55835c703f0fc095f54d716d..0d3fd8bba11b495cb3f4e4b29d18c9deb3e34faa 100644
+--- a/apps/mobile/src/Stack.tsx
++++ b/apps/mobile/src/Stack.tsx
+@@ -142,6 +142,7 @@ import { UsageRouteScreen } from "./features/usage/UsageRouteScreen";
+ import { WorkflowRunRouteScreen } from "./features/workflows/WorkflowRunRouteScreen";
+ import { WorkflowStepSheet } from "./features/workflows/WorkflowStepSheet";
+ import { SettingsAboutRouteScreen } from "./features/settings/SettingsAboutRouteScreen";
++import { SettingsConnectServiceRouteScreen } from "./features/settings/SettingsConnectServiceRouteScreen";
+ import { SettingsNotificationsRouteScreen } from "./features/settings/SettingsNotificationsRouteScreen";
+ import { SettingsSshRouteScreen } from "./features/settings/SettingsSshRouteScreen";
+ import { SettingsClientCertificateRouteScreen } from "./features/settings/SettingsClientCertificateRouteScreen";
+@@ -185,6 +186,7 @@ const ROUTE_TITLES: Readonly<Record<string, string>> = {
+   SettingsNotifications: msg("Notifications"),
+   SettingsClientCertificate: msg("Client certificate"),
+   SettingsSsh: "SSH",
++  SettingsConnectService: msg("T3 Connect service"),
+   SettingsThreads: msg("Threads"),
+   SettingsAbout: msg("About"),
+   SettingsEnvironmentNew: msg("Add Environment"),
+@@ -314,6 +316,11 @@ const SETTINGS_SCREENS = {
+     linking: "settings/ssh",
+     options: settingsPage(),
+   }),
++  SettingsConnectService: createNativeStackScreen({
++    screen: SettingsConnectServiceRouteScreen,
++    linking: "settings/connect-service",
++    options: settingsPage(),
++  }),
+   SettingsThreads: createNativeStackScreen({
+     screen: SettingsThreadsRouteScreen,
+     linking: "settings/thread-preferences",
+diff --git a/apps/mobile/src/features/cloud/connectService.ts b/apps/mobile/src/features/cloud/connectService.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..d20d7a787a9d26bbc8393cabe0352d8d69990e8c
+--- /dev/null
++++ b/apps/mobile/src/features/cloud/connectService.ts
+@@ -0,0 +1,63 @@
++import type { ConnectServiceSettings } from "@t3tools/contracts";
++import {
++  type BuiltInConnectService,
++  type ConnectServiceDraft,
++  checkConnectService,
++  parseConnectServiceSettings,
++  readConnectServiceSettings,
++} from "@t3tools/shared/connectService";
++
++const STORAGE_KEY = "t3code.connect-service.v1";
++
++// Loaded on use: this module sits under the public config, which code without native modules imports.
++const secureStore = () => require("expo-secure-store") as typeof import("expo-secure-store");
++
++function readSavedConnectService(): ConnectServiceSettings | null {
++  // A value this app cannot read is the same as none: startup must never depend on it.
++  try {
++    return readConnectServiceSettings(
++      parseConnectServiceSettings(secureStore().getItem(STORAGE_KEY)),
++    );
++  } catch {
++    return null;
++  }
++}
++
++let savedAtStartup: ConnectServiceSettings | null | undefined;
++
++/**
++ * Read once. Clerk and the relay client are built from it while the app loads, so a service
++ * saved later takes effect on the next start and never half-applies to this one.
++ */
++export function savedConnectService(): ConnectServiceSettings | null {
++  if (savedAtStartup === undefined) savedAtStartup = readSavedConnectService();
++  return savedAtStartup;
++}
++
++/** Mobile has no command-line sign-in, so its builds carry no client ID for it. */
++export function builtInConnectService(config: {
++  readonly clerk: { readonly publishableKey: string | null; readonly jwtTemplate: string | null };
++  readonly relay: { readonly url: string | null };
++}): BuiltInConnectService {
++  return {
++    relayUrl: config.relay.url,
++    clerkPublishableKey: config.clerk.publishableKey,
++    clerkJwtTemplate: config.clerk.jwtTemplate,
++    clerkCliOAuthClientId: null,
++  };
++}
++
++export function checkConnectServiceDraft(draft: ConnectServiceDraft) {
++  return checkConnectService(draft, {
++    fetch: (url, init) => globalThis.fetch(url, { ...init, credentials: "omit" }),
++  });
++}
++
++/** Stores the service for the next start, or clears it to return to the built-in one. */
++export function storeConnectService(settings: ConnectServiceSettings | null): void {
++  if (settings === null)
++    secureStore()
++      .deleteItemAsync(STORAGE_KEY)
++      .catch(() => undefined);
++  else secureStore().setItem(STORAGE_KEY, JSON.stringify(settings));
++}
+diff --git a/apps/mobile/src/features/cloud/publicConfig.test.ts b/apps/mobile/src/features/cloud/publicConfig.test.ts
+index 8c09819aa72f35e6974f2970ba419ac78454f08e..86b9e4bd7a924ac1db83d5e91fbd7148edf83a53 100644
+--- a/apps/mobile/src/features/cloud/publicConfig.test.ts
++++ b/apps/mobile/src/features/cloud/publicConfig.test.ts
+@@ -1,6 +1,18 @@
+ import { describe, expect, it, vi } from "vite-plus/test";
+ 
+-import { resolveCloudPublicConfig } from "./publicConfig";
++import { hasCloudPublicConfig, resolveCloudPublicConfig } from "./publicConfig";
++
++const saved = vi.hoisted(() => ({
++  service: null as null | {
++    relayUrl: string;
++    clerkPublishableKey: string;
++    clerkJwtTemplate: string;
++    clerkCliOAuthClientId: null;
++    source: "discovered";
++  },
++}));
++
++vi.mock("./connectService", () => ({ savedConnectService: () => saved.service }));
+ 
+ vi.mock("expo-constants", () => ({
+   default: {
+@@ -11,7 +23,32 @@ vi.mock("expo-constants", () => ({
+ }));
+ 
+ describe("resolveCloudPublicConfig", () => {
++  it("uses a service saved on this device in place of the build's, keeping its tracing", () => {
++    saved.service = {
++      relayUrl: "https://relay.saved.test",
++      clerkPublishableKey: "pk_test_saved",
++      clerkJwtTemplate: "saved-template",
++      clerkCliOAuthClientId: null,
++      source: "discovered",
++    };
++
++    expect(
++      resolveCloudPublicConfig({
++        clerk: { publishableKey: "pk_test_example", jwtTemplate: "t3-relay" },
++        relay: { url: "https://relay.example.test" },
++        observability: { tracesDataset: "mobile" },
++      }),
++    ).toEqual({
++      clerk: { publishableKey: "pk_test_saved", jwtTemplate: "saved-template" },
++      relay: { url: "https://relay.saved.test" },
++      observability: { tracesUrl: null, tracesDataset: "mobile", tracesToken: null },
++    });
++    // The build in this test ships nothing, so the saved service alone turns T3 Connect on.
++    expect(hasCloudPublicConfig()).toBe(true);
++  });
++
+   it("rejects an insecure relay URL", () => {
++    saved.service = null;
+     expect(
+       resolveCloudPublicConfig({
+         clerk: { publishableKey: "pk_test_example", jwtTemplate: "t3-relay" },
+diff --git a/apps/mobile/src/features/cloud/publicConfig.ts b/apps/mobile/src/features/cloud/publicConfig.ts
+index a91a8024d48516008f87e08f3e8905b3abb46930..9512b908a0b7387a24be89a1a7741e93b8765517 100644
+--- a/apps/mobile/src/features/cloud/publicConfig.ts
++++ b/apps/mobile/src/features/cloud/publicConfig.ts
+@@ -3,6 +3,8 @@ import { relayClerkTokenOptions } from "@t3tools/shared/relayAuth";
+ import { normalizeSecureRelayUrl } from "@t3tools/shared/relayUrl";
+ import * as Schema from "effect/Schema";
+ 
++import { savedConnectService } from "./connectService";
++
+ export class CloudPublicConfigMissingError extends Schema.TaggedError<CloudPublicConfigMissingError>()(
+   "CloudPublicConfigMissingError",
+   {
+@@ -56,7 +58,7 @@ function normalizeSecureUrl(value: unknown): string | null {
+   }
+ }
+ 
+-export function resolveCloudPublicConfig(extra: ExpoExtra = Constants.expoConfig?.extra) {
++export function resolveBuiltInCloudPublicConfig(extra: ExpoExtra = Constants.expoConfig?.extra) {
+   return {
+     clerk: {
+       publishableKey: trimNonEmpty(extra?.clerk?.publishableKey),
+@@ -73,6 +75,18 @@ export function resolveCloudPublicConfig(extra: ExpoExtra = Constants.expoConfig
+   } satisfies CloudPublicConfig;
+ }
+ 
++/** A service saved on this device replaces the one the build ships with. */
++export function resolveCloudPublicConfig(extra?: ExpoExtra): CloudPublicConfig {
++  const builtIn = resolveBuiltInCloudPublicConfig(extra);
++  const saved = savedConnectService();
++  if (saved === null) return builtIn;
++  return {
++    ...builtIn,
++    clerk: { publishableKey: saved.clerkPublishableKey, jwtTemplate: saved.clerkJwtTemplate },
++    relay: { url: saved.relayUrl },
++  };
++}
++
+ export function hasCloudPublicConfig(): boolean {
+   const config = resolveCloudPublicConfig();
+   return Boolean(config.clerk.publishableKey && config.clerk.jwtTemplate && config.relay.url);
+diff --git a/apps/mobile/src/features/settings/SettingsConnectServiceRouteScreen.tsx b/apps/mobile/src/features/settings/SettingsConnectServiceRouteScreen.tsx
+new file mode 100644
+index 0000000000000000000000000000000000000000..d0638ad63da8a91a00c122e977af5d113d7c7ee2
+--- /dev/null
++++ b/apps/mobile/src/features/settings/SettingsConnectServiceRouteScreen.tsx
+@@ -0,0 +1,267 @@
++import { getClerkInstance } from "@clerk/expo";
++import { runAtomCommand, settlePromise } from "@t3tools/client-runtime/state/runtime";
++import type { ConnectServiceSettings } from "@t3tools/contracts";
++import { type ConnectServiceCheck, resolveConnectService } from "@t3tools/shared/connectService";
++import {
++  connectServiceCheckProblem,
++  connectServiceSourceLabel,
++} from "@t3tools/shared/connectServiceCopy";
++import * as Updates from "expo-updates";
++import { T, useGT, useMessages } from "gt-react-native";
++import { useState } from "react";
++import { DevSettings, View } from "react-native";
++import { useSafeAreaInsets } from "react-native-safe-area-context";
++
++import { AppText as Text } from "../../components/ui/AppText";
++import { Button } from "../../components/ui/Button";
++import * as Dialog from "../../components/ui/Dialog";
++import { ScreenScrollView as ScrollView } from "../../components/ui/ScreenScrollView";
++import { runtime } from "../../lib/runtime";
++import { appAtomRegistry } from "../../state/atom-registry";
++import { unregisterAgentAwarenessDeviceForCurrentUser } from "../agent-awareness/remoteRegistration";
++import { removeCloudEnvironments } from "../cloud/cloud-drafts";
++import {
++  builtInConnectService,
++  checkConnectServiceDraft,
++  savedConnectService,
++  storeConnectService,
++} from "../cloud/connectService";
++import {
++  resolveBuiltInCloudPublicConfig,
++  resolveCloudPublicConfig,
++  resolveRelayClerkTokenOptions,
++} from "../cloud/publicConfig";
++import { ConnectionFormField } from "../connection/ConnectionFormField";
++import { SettingsScreen } from "./components/SettingsScreen";
++import { SettingsSection } from "./components/SettingsSection";
++
++type CheckProblem = Exclude<ConnectServiceCheck, { readonly _tag: "Ready" }>;
++
++/**
++ * Signs out of the service in use and forgets what belongs to it. The account service repeats
++ * this after a sign-out, but the restart that follows would cut it short, so it runs here first.
++ */
++async function leaveConnectService(): Promise<void> {
++  const { clerk, relay } = resolveCloudPublicConfig();
++  if (!clerk.publishableKey || !relay.url) return;
++  const instance = getClerkInstance({ publishableKey: clerk.publishableKey });
++  await runAtomCommand(appAtomRegistry, removeCloudEnvironments, instance.user?.id ?? null, {
++    reportFailure: false,
++    reportDefect: false,
++  });
++  const session = instance.session;
++  if (!session) return;
++  await settlePromise(() =>
++    runtime.runPromiseExit(
++      unregisterAgentAwarenessDeviceForCurrentUser(() =>
++        session.getToken(resolveRelayClerkTokenOptions()),
++      ),
++    ),
++  );
++  await instance.signOut();
++}
++
++async function restartApp(): Promise<void> {
++  // Development builds have no update runtime to reload through.
++  if (__DEV__) return DevSettings.reload();
++  await Updates.reloadAsync();
++}
++
++export function SettingsConnectServiceRouteScreen() {
++  const gt = useGT();
++  const messages = useMessages();
++  const insets = useSafeAreaInsets();
++  const builtIn = builtInConnectService(resolveBuiltInCloudPublicConfig());
++  const applied = resolveConnectService(savedConnectService(), builtIn);
++  const saved = applied.source === "discovered" || applied.source === "manual";
++  const typed = applied.source === "manual";
++  const [relayUrl, setRelayUrl] = useState(applied.relayUrl ?? "");
++  const [clerkPublishableKey, setClerkPublishableKey] = useState(
++    typed ? (applied.clerkPublishableKey ?? "") : "",
++  );
++  const [clerkJwtTemplate, setClerkJwtTemplate] = useState(
++    typed ? (applied.clerkJwtTemplate ?? "") : "",
++  );
++  const [advancedOpen, setAdvancedOpen] = useState(typed);
++  const [checking, setChecking] = useState(false);
++  const [problem, setProblem] = useState<CheckProblem | "check-failed" | "unchanged" | null>(null);
++  const [applying, setApplying] = useState(false);
++  const [restartNeeded, setRestartNeeded] = useState(false);
++
++  const edit = (set: (value: string) => void) => (value: string) => {
++    set(value);
++    setProblem(null);
++  };
++
++  const apply = async (settings: ConnectServiceSettings | null) => {
++    setApplying(true);
++    // Leaving can fail when the old service is the broken thing being replaced.
++    await settlePromise(leaveConnectService);
++    storeConnectService(settings);
++    const restarted = await settlePromise(restartApp);
++    if (restarted._tag === "Success") return;
++    setApplying(false);
++    setRestartNeeded(true);
++  };
++
++  const confirm = (settings: ConnectServiceSettings | null) =>
++    Dialog.confirm({
++      title:
++        settings === null
++          ? gt("Go back to the built-in service?")
++          : gt("Use {host} for T3 Connect?", { host: settings.relayUrl.replace("https://", "") }),
++      message: gt(
++        "The app will restart. You will be signed out of the current service, and machines reached through it leave your list until you link them to the new one.",
++      ),
++      confirmText: gt("Restart and switch"),
++      onConfirm: () => void apply(settings),
++    });
++
++  const submit = async () => {
++    setProblem(null);
++    setChecking(true);
++    const result = await settlePromise(() =>
++      checkConnectServiceDraft({
++        relayUrl,
++        clerkPublishableKey,
++        clerkJwtTemplate,
++        clerkCliOAuthClientId: "",
++      }),
++    );
++    setChecking(false);
++    if (result._tag !== "Success") return setProblem("check-failed");
++    const check = result.value;
++    if (check._tag !== "Ready") {
++      if (check._tag === "NotPublished" || check._tag === "UnreadableDocument") {
++        setAdvancedOpen(true);
++      }
++      return setProblem(check);
++    }
++    const next = check.settings;
++    if (
++      next.source === applied.source &&
++      next.relayUrl === applied.relayUrl &&
++      next.clerkPublishableKey === applied.clerkPublishableKey &&
++      next.clerkJwtTemplate === applied.clerkJwtTemplate
++    ) {
++      return setProblem("unchanged");
++    }
++    confirm(next);
++  };
++
++  const problemText =
++    problem === null
++      ? null
++      : problem === "check-failed"
++        ? gt("Could not check this address. Try again.")
++        : problem === "unchanged"
++          ? gt("This device already uses this service.")
++          : connectServiceCheckProblem(problem, messages);
++  const busy = checking || applying;
++
++  return (
++    <SettingsScreen title={gt("T3 Connect service")}>
++      <ScrollView
++        contentInsetAdjustmentBehavior="automatic"
++        keyboardShouldPersistTaps="handled"
++        showsVerticalScrollIndicator={false}
++        className="flex-1"
++        contentContainerClassName="gap-4 px-5 pt-4"
++        contentContainerStyle={{ paddingBottom: Math.max(insets.bottom, 18) + 18 }}
++      >
++        <SettingsSection
++          title={gt("Connect address")}
++          footer={
++            applied.relayUrl === null
++              ? gt(
++                  "T3 Connect is not set up on this device. Enter the address of a Connect service to turn it on.",
++                )
++              : gt("Using {host}. {source}.", {
++                  host: applied.relayUrl.replace("https://", ""),
++                  source: connectServiceSourceLabel(applied.source, messages),
++                })
++          }
++        >
++          <View className="gap-3 p-4">
++            <ConnectionFormField
++              label={gt("Connect address")}
++              autoCapitalize="none"
++              autoCorrect={false}
++              keyboardType="url"
++              placeholder="https://relay.example.com"
++              value={relayUrl}
++              editable={!busy}
++              onChangeText={edit(setRelayUrl)}
++            />
++            {advancedOpen ? (
++              <>
++                <ConnectionFormField
++                  label={gt("Sign-in key")}
++                  autoCapitalize="none"
++                  autoCorrect={false}
++                  placeholder="pk_live_…"
++                  value={clerkPublishableKey}
++                  editable={!busy}
++                  onChangeText={edit(setClerkPublishableKey)}
++                />
++                <ConnectionFormField
++                  label={gt("Token template")}
++                  autoCapitalize="none"
++                  autoCorrect={false}
++                  placeholder="t3-relay"
++                  value={clerkJwtTemplate}
++                  editable={!busy}
++                  onChangeText={edit(setClerkJwtTemplate)}
++                />
++                <Text className="text-sm text-foreground-muted">
++                  <T>Leave both empty to use the values the service publishes.</T>
++                </Text>
++              </>
++            ) : null}
++            {problemText ? (
++              <Text
++                accessibilityRole={problem === "unchanged" ? "text" : "alert"}
++                className={
++                  problem === "unchanged"
++                    ? "text-sm text-foreground-muted"
++                    : "text-sm text-danger-foreground"
++                }
++              >
++                {problemText}
++              </Text>
++            ) : null}
++            {restartNeeded ? (
++              <Text accessibilityRole="alert" className="text-sm text-foreground">
++                <T>Saved. Close the app and open it again to finish switching.</T>
++              </Text>
++            ) : null}
++            <View className="flex-row flex-wrap gap-3">
++              <Button
++                label={gt("Save")}
++                tone="primary"
++                loading={busy}
++                disabled={relayUrl.trim() === ""}
++                onPress={() => void submit()}
++              />
++              {advancedOpen ? null : (
++                <Button
++                  label={gt("Advanced")}
++                  tone="text"
++                  disabled={busy}
++                  onPress={() => setAdvancedOpen(true)}
++                />
++              )}
++              {saved ? (
++                <Button
++                  label={builtIn.relayUrl ? gt("Reset to built-in") : gt("Remove")}
++                  disabled={busy}
++                  onPress={() => confirm(null)}
++                />
++              ) : null}
++            </View>
++          </View>
++        </SettingsSection>
++      </ScrollView>
++    </SettingsScreen>
++  );
++}
+diff --git a/apps/mobile/src/features/settings/SettingsRouteScreen.tsx b/apps/mobile/src/features/settings/SettingsRouteScreen.tsx
+index 54004663f1418e829ffc5c8ab293eb5913b2a8ec..4518e02533411d420b4378e54237983cdb7065d8 100644
+--- a/apps/mobile/src/features/settings/SettingsRouteScreen.tsx
++++ b/apps/mobile/src/features/settings/SettingsRouteScreen.tsx
+@@ -142,6 +142,7 @@ function ConfiguredSettingsRouteScreen() {
+           target: "SettingsNotifications",
+         },
+         ...sshRows(gt),
++        connectServiceRow(gt("T3 Connect service")),
+       ]}
+     />
+   );
+@@ -155,6 +156,7 @@ function LocalSettingsRouteScreen() {
+       connections={[
+         environmentsRow(gt("Environments"), Object.keys(savedConnectionsById).length),
+         ...sshRows(gt),
++        connectServiceRow(gt("T3 Connect service")),
+       ]}
+     />
+   );
+@@ -175,6 +177,14 @@ const sshRows = (gt: ReturnType<typeof useGT>): readonly SettingsListRow[] => [
+       ]
+     : []),
+ ];
++function connectServiceRow(label: string): SettingsListRow {
++  return {
++    id: "SettingsConnectService",
++    icon: "globe",
++    label,
++    target: "SettingsConnectService",
++  };
++}
+ 
+ function environmentsRow(label: string, count: number): SettingsListRow {
+   return {
+diff --git a/apps/mobile/src/features/settings/components/settings-page-targets.ts b/apps/mobile/src/features/settings/components/settings-page-targets.ts
+index 64b893bf55ec3ac1f253d9dabaa809d33118c06b..74582e1202dca23d3e87350852afec37cbbd2a83 100644
+--- a/apps/mobile/src/features/settings/components/settings-page-targets.ts
++++ b/apps/mobile/src/features/settings/components/settings-page-targets.ts
+@@ -4,6 +4,7 @@ export const SETTINGS_PAGE_TARGETS = [
+   "SettingsNotifications",
+   "SettingsSsh",
+   "SettingsClientCertificate",
++  "SettingsConnectService",
+   "SettingsThreads",
+   "SettingsAbout",
+   "SettingsArchive",
+diff --git a/apps/mobile/src/features/settings/settings-search.ts b/apps/mobile/src/features/settings/settings-search.ts
+index d23f03591e4f7e91e5a72a6d900ff8045f129209..f750142eeeb98f23f22ca06098e40d375c16ed88 100644
+--- a/apps/mobile/src/features/settings/settings-search.ts
++++ b/apps/mobile/src/features/settings/settings-search.ts
+@@ -22,6 +22,11 @@ const SETTINGS_SEARCH_TERMS = {
+     msg("remote", { $context: "settings search keyword" }),
+     "tailscale",
+   ],
++  SettingsConnectService: [
++    msg("relay", { $context: "settings search keyword" }),
++    msg("self-hosted", { $context: "settings search keyword" }),
++    msg("connect address", { $context: "settings search keyword" }),
++  ],
+   SettingsNotifications: [
+     msg("push", { $context: "settings search keyword" }),
+     msg("alerts", { $context: "settings search keyword" }),

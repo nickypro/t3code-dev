@@ -1,0 +1,45 @@
+diff --git a/apps/web/src/components/sidebar/SidebarChrome.tsx b/apps/web/src/components/sidebar/SidebarChrome.tsx
+index c0b1bbd38a41bec726b4a80b96953baa97ab4112..af2daa174857c97fab99fa1c62f05fe313a37d49 100644
+--- a/apps/web/src/components/sidebar/SidebarChrome.tsx
++++ b/apps/web/src/components/sidebar/SidebarChrome.tsx
+@@ -116,7 +116,7 @@ export function SidebarBrandWidthProbe({
+       ref={observeWidth}
+     >
+       <div className="ml-[var(--workspace-titlebar-content-left)] flex gap-1">
+-        <SidebarBrandMark />
++        <SidebarBrandMark onBackdrop={false} />
+         {isElectron ? <div className="w-[calc(2*var(--workspace-titlebar-control-size))]" /> : null}
+       </div>
+     </div>
+@@ -177,17 +177,25 @@ function SidebarBrand({ onBackdrop }: { onBackdrop: boolean }) {
+       )}
+       to="/"
+     >
+-      <SidebarBrandMark />
++      <SidebarBrandMark onBackdrop={onBackdrop} />
+     </Link>
+   );
+ }
+ 
+-function SidebarBrandMark() {
+-  // Just "Catgirl": a longer title raises the sidebar's minimum width and pushes the header along.
++function SidebarBrandMark({ onBackdrop }: { onBackdrop: boolean }) {
++  // "Cat Code" is as wide as upstream's mark: a longer title raises the sidebar's minimum width.
+   return (
+-    <span className="inline-flex min-w-0 items-baseline text-sm font-semibold tracking-tight">
+-      <span className="truncate [text-box:trim-both_cap_alphabetic] supports-[text-box:trim-both_cap_alphabetic]:py-1">
+-        Catgirl
++    <span className="inline-flex min-w-0 items-baseline gap-1 text-sm tracking-tight">
++      <span className="shrink-0 font-bold [text-box:trim-both_cap_alphabetic] supports-[text-box:trim-both_cap_alphabetic]:py-1">
++        Cat
++      </span>
++      <span
++        className={cn(
++          "truncate font-medium [text-box:trim-both_cap_alphabetic] supports-[text-box:trim-both_cap_alphabetic]:py-1",
++          onBackdrop ? "text-white/70" : "text-muted-foreground",
++        )}
++      >
++        Code
+       </span>
+     </span>
+   );

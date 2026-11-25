@@ -94,7 +94,7 @@ index 429d0e4c4b4bfe9e953f8c2a53703da1cce49b24..b7e91600d518fc07f5bd8becd47c60e8
      bodies.set(rootThreadId, body);
    }
 diff --git a/apps/web/src/components/sidebar/SidebarCatFleet.tsx b/apps/web/src/components/sidebar/SidebarCatFleet.tsx
-index a27b4010a07d31cc45b41b626a4604173eb27a2c..5b40adc225baa12e614f89ce8e00fc0f92bee37b 100644
+index a27b4010a07d31cc45b41b626a4604173eb27a2c..0534775f9f210d677f0476c6e26f79e8f431d2b2 100644
 --- a/apps/web/src/components/sidebar/SidebarCatFleet.tsx
 +++ b/apps/web/src/components/sidebar/SidebarCatFleet.tsx
 @@ -3,11 +3,12 @@ import { memo, useId } from "react";
@@ -112,15 +112,12 @@ index a27b4010a07d31cc45b41b626a4604173eb27a2c..5b40adc225baa12e614f89ce8e00fc0f
  const HEAD = { x: 33, y: 20.5, radius: 11.5 };
  const HEAD_SCALE = HEAD.radius / 133;
  const HEAD_VIEW_BOX = `${256 - HEAD.x / HEAD_SCALE} ${261 - HEAD.y / HEAD_SCALE} ${PLANET.width / HEAD_SCALE} ${PLANET.height / HEAD_SCALE}`;
-@@ -24,12 +25,19 @@ const STOPPED_SIZE = 4.2;
+@@ -24,12 +25,16 @@ const STOPPED_SIZE = 4.2;
  const SUBAGENT = { size: 2.2, radius: 4.8, period: 3.2, max: 3 };
  const MOON_COLORS = ["var(--color-cat-pink)", "var(--color-cat-cream)", "var(--color-cat-peach)"];
  const MAX_BODIES = 14;
-+// Stopped threads lie scattered just under the cat: across this arc of its outline, and from
-+// just overlapping it to this far off.
-+const SCATTER = { size: 3.4, arc: 112, drift: 2.4, overlap: 0.5 };
-+// A cat with work running glows, fully once this many threads and sub-agents run on it.
-+const GLOW = { radius: 21, full: 5 };
++// Stopped threads lie scattered under the cat's chin, as far out as this and this deep.
++const SCATTER = { halfWidth: 14, gap: 2.2, depth: 4.5, floor: 30.5 };
 +const MAX_STOPPED = 16;
 +const CARD_ROWS = 8;
  const POINT = "absolute top-0 left-0 size-0";
@@ -130,11 +127,11 @@ index a27b4010a07d31cc45b41b626a4604173eb27a2c..5b40adc225baa12e614f89ce8e00fc0f
 - * Every machine as a cat planet. A running thread is a moon in orbit, a stopped one is a ring
 - * frozen where it stopped, and a running sub-agent circles the thread that started it.
 + * Every machine as a cat planet. A running thread is a moon in orbit, a stopped one is a dim
-+ * ring lying just under the cat, and a running sub-agent circles the thread that started it.
++ * ring lying under the cat, and a running sub-agent circles the thread that started it.
   */
  export const SidebarCatFleet = memo(function SidebarCatFleet({
    machines,
-@@ -38,11 +46,14 @@ export const SidebarCatFleet = memo(function SidebarCatFleet({
+@@ -38,11 +43,14 @@ export const SidebarCatFleet = memo(function SidebarCatFleet({
  }) {
    if (machines.length === 0) return null;
    return (
@@ -154,7 +151,7 @@ index a27b4010a07d31cc45b41b626a4604173eb27a2c..5b40adc225baa12e614f89ce8e00fc0f
    );
  });
  
-@@ -55,9 +66,23 @@ function describeMachine(machine: CatFleetMachine): string {
+@@ -55,9 +63,21 @@ function describeMachine(machine: CatFleetMachine): string {
    return `${running} running${subagentNote}, ${machine.bodies.length - running} stopped`;
  }
  
@@ -174,12 +171,10 @@ index a27b4010a07d31cc45b41b626a4604173eb27a2c..5b40adc225baa12e614f89ce8e00fc0f
 +  const shown = machine.offline ? [] : machine.bodies;
 +  const bodies = shown.filter(isInOrbit).slice(0, MAX_BODIES);
 +  const stopped = shown.filter((body) => !isInOrbit(body)).slice(0, MAX_STOPPED);
-+  const active = shown.reduce((total, body) => total + (body.running ? 1 : 0) + body.subagents, 0);
-+  const glow = Math.min(1, active / GLOW.full);
    const speed = 0.9 + fleetHashUnit(machine.environmentId) * 0.3;
    const summary = describeMachine(machine);
    const fill = machine.offline ? "currentColor" : `url(#${gradientId})`;
-@@ -68,13 +93,25 @@ function CatPlanet({ machine }: { machine: CatFleetMachine }) {
+@@ -68,7 +88,7 @@ function CatPlanet({ machine }: { machine: CatFleetMachine }) {
          render={
            <div
              aria-label={`${machine.label}: ${summary}`}
@@ -188,25 +183,7 @@ index a27b4010a07d31cc45b41b626a4604173eb27a2c..5b40adc225baa12e614f89ce8e00fc0f
              role="img"
              style={{ width: PLANET.width }}
            />
-         }
-       >
-         <div className="relative" style={PLANET}>
-+          {glow > 0 ? (
-+            <span
-+              className="pointer-events-none absolute z-0 rounded-full"
-+              style={{
-+                left: HEAD.x - GLOW.radius,
-+                top: HEAD.y - GLOW.radius,
-+                width: 2 * GLOW.radius,
-+                height: 2 * GLOW.radius,
-+                background: `radial-gradient(closest-side, color-mix(in srgb, var(--color-cat-light) ${Math.round(30 + 50 * glow)}%, transparent) 50%, transparent)`,
-+              }}
-+            />
-+          ) : null}
-           <OrbitLayer side="back" bodies={bodies} speed={speed} />
-           <svg
-             aria-hidden="true"
-@@ -108,6 +145,9 @@ function CatPlanet({ machine }: { machine: CatFleetMachine }) {
+@@ -108,6 +128,9 @@ function CatPlanet({ machine }: { machine: CatFleetMachine }) {
              />
              <circle cx="256" cy="261" fill={fill} r="133" />
            </svg>
@@ -216,7 +193,7 @@ index a27b4010a07d31cc45b41b626a4604173eb27a2c..5b40adc225baa12e614f89ce8e00fc0f
            <OrbitLayer side="front" bodies={bodies} speed={speed} />
          </div>
          <span
-@@ -119,13 +159,83 @@ function CatPlanet({ machine }: { machine: CatFleetMachine }) {
+@@ -119,13 +142,82 @@ function CatPlanet({ machine }: { machine: CatFleetMachine }) {
            {machine.label}
          </span>
        </TooltipTrigger>
@@ -275,26 +252,25 @@ index a27b4010a07d31cc45b41b626a4604173eb27a2c..5b40adc225baa12e614f89ce8e00fc0f
 +}
 +
 +/**
-+ * A stopped thread, lying just under the cat. Each dot gets its own share of the arc so they do
-+ * not stack, and its key places it within that share and sets how far off the cat it lies.
++ * A stopped thread, lying under the cat. The dots spread evenly from side to side so they do not
++ * stack, and each one's own key nudges it, so the row looks scattered and not ruled.
 + */
 +function StoppedDot({ body, index, total }: { body: CatFleetBody; index: number; total: number }) {
-+  const share = SCATTER.arc / total;
-+  const along = (index + 0.5 - total / 2 + (fleetHashUnit(body.key) - 0.5) * 0.9) * share;
-+  const angle = ((90 + along) * Math.PI) / 180;
-+  const distance =
-+    HEAD.radius +
-+    SCATTER.size / 2 -
-+    SCATTER.overlap +
-+    fleetHashUnit(`${body.key}:drift`) * SCATTER.drift;
++  const step = (2 * SCATTER.halfWidth) / total;
++  const x = (index + 0.5 + (fleetHashUnit(body.key) - 0.5) * 0.7) * step - SCATTER.halfWidth;
++  // Under the head the dots follow the chin. Beside it they rest on the same floor.
++  const chin = HEAD.y + Math.sqrt(Math.max(0, HEAD.radius ** 2 - x ** 2));
++  const y =
++    Math.max(chin + SCATTER.gap, SCATTER.floor) +
++    fleetHashUnit(`${body.key}:depth`) * SCATTER.depth;
 +  return (
 +    <span
 +      className="pointer-events-none absolute z-[1] rounded-full border border-current opacity-60"
 +      style={{
-+        left: HEAD.x + distance * Math.cos(angle) - SCATTER.size / 2,
-+        top: HEAD.y + distance * Math.sin(angle) - SCATTER.size / 2,
-+        width: SCATTER.size,
-+        height: SCATTER.size,
++        left: HEAD.x + x - STOPPED_SIZE / 2,
++        top: y - STOPPED_SIZE / 2,
++        width: STOPPED_SIZE,
++        height: STOPPED_SIZE,
 +      }}
 +    />
 +  );
@@ -303,7 +279,7 @@ index a27b4010a07d31cc45b41b626a4604173eb27a2c..5b40adc225baa12e614f89ce8e00fc0f
  /**
   * Each orbit is a flat circle squashed and tilted by one static transform; only rotations
   * animate, so the compositor moves the moons without repainting. The back copy is whole and
-@@ -202,9 +312,10 @@ function OrbitingBody({
+@@ -202,9 +294,10 @@ function OrbitingBody({
    radius: number;
  }) {
    const unit = fleetHashUnit(body.key);

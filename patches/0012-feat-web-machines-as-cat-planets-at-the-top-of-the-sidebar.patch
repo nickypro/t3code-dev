@@ -1,8 +1,8 @@
 diff --git a/apps/web/src/components/Sidebar.tsx b/apps/web/src/components/Sidebar.tsx
-index e1be2f55f42d757f8b81d5955f4042bf0d52203e..471c54bedd3cb50d3d3f811668252a41b6f7d7b0 100644
+index bcb66147184623171d330b467f1f03235c4b988a..a3f3a7becea2e4a15bc25e8a05bfaabdb3b96a60 100644
 --- a/apps/web/src/components/Sidebar.tsx
 +++ b/apps/web/src/components/Sidebar.tsx
-@@ -252,6 +252,8 @@ import {
+@@ -258,6 +258,8 @@ import {
    useComboboxFilter,
  } from "./ui/combobox";
  import { SidebarContent, SidebarGroup, useSidebar } from "./ui/sidebar";
@@ -10,8 +10,8 @@ index e1be2f55f42d757f8b81d5955f4042bf0d52203e..471c54bedd3cb50d3d3f811668252a41
 +import { summarizeCatFleet } from "./sidebar/SidebarCatFleet.logic";
  import { SidebarChromeFooter, SidebarChromeHeader } from "./sidebar/SidebarChrome";
  import { SidebarHeaderIconButton, SidebarThreadHeader } from "./sidebar/SidebarThreadHeader";
- import { TooltipProvider } from "./ui/tooltip";
-@@ -2992,9 +2994,17 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
+ import { TooltipProvider, TooltipScrollDismissArea } from "./ui/tooltip";
+@@ -3113,9 +3115,17 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
        ? shortcutLabelForCommand(keybindings, "chat.newLocal")
        : undefined);
    const newThreadInProjectShortcutLabel = shortcutLabelForCommand(keybindings, "chat.newLocal");
@@ -484,10 +484,10 @@ index 0000000000000000000000000000000000000000..a27b4010a07d31cc45b41b626a460417
 +  );
 +}
 diff --git a/apps/web/src/index.css b/apps/web/src/index.css
-index 771c714b1ff8a210ecaa7ad398e2769036162482..961cbd9f2e931a7e83c5ba8c3e7b66a146a35e7c 100644
+index 6ce3f831c9ea9f94efe50e72081c3adac8b07acc..9d7ce2f976a7318150f0bf04c2e43f8ed929c44f 100644
 --- a/apps/web/src/index.css
 +++ b/apps/web/src/index.css
-@@ -168,6 +168,14 @@ html[data-mobile-composer-route-transition="true"]::view-transition-old(t3-mobil
+@@ -170,6 +170,14 @@ html[data-mobile-composer-route-transition="true"]::view-transition-old(t3-mobil
     the variables and Settings -> Appearance can override them at runtime. The
     default stacks are mirrored in `appearanceFonts.ts`. */
  @theme {
@@ -502,7 +502,7 @@ index 771c714b1ff8a210ecaa7ad398e2769036162482..961cbd9f2e931a7e83c5ba8c3e7b66a1
    --font-sans:
      -apple-system, BlinkMacSystemFont, "Inter Variable", "Segoe UI", system-ui, sans-serif;
    --font-mono:
-@@ -583,6 +591,26 @@ html[data-mobile-composer-route-transition="true"]::view-transition-old(t3-mobil
+@@ -610,6 +618,26 @@ html[data-mobile-composer-route-transition="true"]::view-transition-old(t3-mobil
    will-change: var(--visible-animation-will-change, auto);
  }
  

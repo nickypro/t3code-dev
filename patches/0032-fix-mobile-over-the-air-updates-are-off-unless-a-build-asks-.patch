@@ -1,0 +1,14 @@
+diff --git a/apps/mobile/app.config.ts b/apps/mobile/app.config.ts
+index 43397fecf173578c2f419f4aa7164461727c905c..4e2009e44e271dcb5a9b01937bb9fa15e46cfb60 100644
+--- a/apps/mobile/app.config.ts
++++ b/apps/mobile/app.config.ts
+@@ -247,7 +247,8 @@ const config: ExpoConfig = {
+   icon: variant.assets.appIcon,
+   userInterfaceStyle: "automatic",
+   updates: {
+-    enabled: repoEnv.T3CODE_MOBILE_UPDATES_ENABLED !== "0",
++    // The feed below is upstream's Expo project, so a Catgirl Code build has to ask for it.
++    enabled: repoEnv.T3CODE_MOBILE_UPDATES_ENABLED === "1",
+     url: "https://u.expo.dev/d763fcb8-d37c-41ea-a773-b54a0ab4a454",
+     checkAutomatically: "ON_LOAD",
+     fallbackToCacheTimeout: 0,

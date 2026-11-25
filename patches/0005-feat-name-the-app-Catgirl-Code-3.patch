@@ -1,8 +1,8 @@
 diff --git a/apps/desktop/package.json b/apps/desktop/package.json
-index 97554fd82320524ccf43a751a45e035823782d2d..797e48f57d7f4d9737f037d96b22a5290fc294e5 100644
+index bd770e285e71b7f1e642634c23c3a811fcbe70eb..1e699d822b85d900035d2146729c55af52747408 100644
 --- a/apps/desktop/package.json
 +++ b/apps/desktop/package.json
-@@ -41,5 +41,5 @@
+@@ -44,5 +44,5 @@
      "tailwindcss": "^4.0.0",
      "vite-plus": "catalog:"
    },
@@ -73,7 +73,7 @@ index 45887a928abb7f89b3c8f3c1425f814845658b27..1603e5627c0ce15d33d76fe952ea6db9
          assert.include(
            identity.desktopEntry ?? "",
 diff --git a/apps/mobile/app.config.ts b/apps/mobile/app.config.ts
-index a4d34fc527aff3d937ee70497a9f2cd32a4b8e47..fcecc0272b741bcb18c2638aadaf6b0fa681f913 100644
+index b3394c4eefd82ef69eac39dfd14113554e854298..642704035a6115c665266149de254027b06e321c 100644
 --- a/apps/mobile/app.config.ts
 +++ b/apps/mobile/app.config.ts
 @@ -79,7 +79,7 @@ const RELEASE_ASSETS = {
@@ -104,10 +104,10 @@ index a4d34fc527aff3d937ee70497a9f2cd32a4b8e47..fcecc0272b741bcb18c2638aadaf6b0f
      iosBundleIdentifier: "com.t3tools.t3code",
      androidPackage: "com.t3tools.t3code",
 diff --git a/apps/web/index.html b/apps/web/index.html
-index 051e3090a5d48f880323cafdb75ae6e9e739e799..ebe80d677814744adc027e45478fffa92907a698 100644
+index 7f8be6fa934c7776090420a590fcf618f0b73421..d2360fb1052d23a7d9c45c313342e387df32e25e 100644
 --- a/apps/web/index.html
 +++ b/apps/web/index.html
-@@ -681,13 +681,13 @@
+@@ -690,13 +690,13 @@
        if (desktopDisplayName) document.title = desktopDisplayName;
      </script>
      <!-- vite.config.ts stamps the web build's channel into this title. -->
@@ -121,9 +121,9 @@ index 051e3090a5d48f880323cafdb75ae6e9e739e799..ebe80d677814744adc027e45478fffa9
 -          <img id="boot-shell-logo" src="/apple-touch-icon.png" alt="T3 Code" />
 +        <div id="boot-shell-card" aria-label="Catgirl Code splash screen">
 +          <img id="boot-shell-logo" src="/apple-touch-icon.png" alt="Catgirl Code" />
+           <p id="boot-shell-progress" role="status" aria-live="polite"></p>
          </div>
        </div>
-     </div>
 diff --git a/apps/web/public/manifest.webmanifest b/apps/web/public/manifest.webmanifest
 index 26d1c2e0d38a0557683973879497501223f522cd..7e7523e5a7bbb2b363d112c76e84383236d423d6 100644
 --- a/apps/web/public/manifest.webmanifest
@@ -139,7 +139,7 @@ index 26d1c2e0d38a0557683973879497501223f522cd..7e7523e5a7bbb2b363d112c76e843832
    "scope": "/",
    "display": "standalone",
 diff --git a/apps/web/src/branding.logic.ts b/apps/web/src/branding.logic.ts
-index f53103d904ad0545fbd377ff9aab31a873554c72..26de44cc19efb27311a955c7a4fa0afea11ddfff 100644
+index 3071a6c0956ee665b9b9ff0416f965c9731caed1..e52ff9b1dae17ab52339c96c293a22dd183b6b34 100644
 --- a/apps/web/src/branding.logic.ts
 +++ b/apps/web/src/branding.logic.ts
 @@ -4,9 +4,14 @@ export function formatAppDisplayName(input: {
@@ -172,10 +172,10 @@ index bf5b76f0dd1b7a4dd698ea943eaa0cc0520c2b82..9cf19f0f9795e1cabbdf7e5214dead9a
    injectedDesktopAppBranding?.stageLabel ??
    resolveWebAppStageLabel({
 diff --git a/apps/web/vite.config.ts b/apps/web/vite.config.ts
-index 83847db8c00a0ddf19cf4b47bddddd440fd0568d..dda4d1d2a8180d557922033c1915fd13b010da13 100644
+index 2a68257cbfa635f5a2e8c33e6e9988f5cc78bb11..a0c94997a3574b94edbcd14095f12ddeb865860d 100644
 --- a/apps/web/vite.config.ts
 +++ b/apps/web/vite.config.ts
-@@ -283,7 +283,7 @@ function bootstrapTitlePlugin(): Plugin {
+@@ -290,7 +290,7 @@ function bootstrapTitlePlugin(): Plugin {
          hostedAppChannel: configuredHostedAppChannel,
          development,
        });
@@ -185,10 +185,10 @@ index 83847db8c00a0ddf19cf4b47bddddd440fd0568d..dda4d1d2a8180d557922033c1915fd13
      },
    };
 diff --git a/scripts/build-desktop-artifact.ts b/scripts/build-desktop-artifact.ts
-index 9d34e2412b327f03f20f88385ee835209ffa3b6b..2410a77ec15ac32bf54dc244ef294136e83a8834 100644
+index 1d334ad98e5fcfa62bd13cb5ec73d723b1e0ea93..1b89ab6754fe306104063e2404c695ddeaf55724 100644
 --- a/scripts/build-desktop-artifact.ts
 +++ b/scripts/build-desktop-artifact.ts
-@@ -2836,11 +2836,24 @@ export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
+@@ -2869,11 +2869,24 @@ export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
    if (platform === "mac") {
      const path = yield* Path.Path;
      const repoRoot = yield* RepoRoot;

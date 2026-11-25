@@ -1,0 +1,272 @@
+diff --git a/apps/web/src/components/Sidebar.tsx b/apps/web/src/components/Sidebar.tsx
+index a3f3a7becea2e4a15bc25e8a05bfaabdb3b96a60..602f954c3619cd78d8c88e8ffe3a21a7b21c7069 100644
+--- a/apps/web/src/components/Sidebar.tsx
++++ b/apps/web/src/components/Sidebar.tsx
+@@ -970,6 +970,8 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
+   const confirmThreadDelete = useClientSettings((s) => s.confirmThreadDelete);
+   const confirmThreadArchive = useClientSettings((s) => s.confirmThreadArchive);
+   const timestampFormat = useClientSettings((s) => s.timestampFormat);
++  const catFleetEnabled = useClientSettings((s) => s.sidebarCatFleetEnabled);
++  const catFleetLimit = useClientSettings((s) => s.sidebarCatFleetLimit);
+   const projectGroupingSettings = useClientSettings(selectProjectGroupingSettings);
+   const {
+     settleThread,
+@@ -3116,20 +3118,22 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
+       : undefined);
+   const newThreadInProjectShortcutLabel = shortcutLabelForCommand(keybindings, "chat.newLocal");
+   // Every thread, not the listed ones: the fleet also shows sub-agents and hidden machines.
+-  const catFleet = summarizeCatFleet({
+-    environmentLabelById,
+-    connectedEnvironmentIds,
+-    threads,
+-    isWorking: isThreadWorking,
+-  });
++  const catFleet = catFleetEnabled
++    ? summarizeCatFleet({
++        environmentLabelById,
++        connectedEnvironmentIds,
++        threads,
++        isWorking: isThreadWorking,
++      })
++    : [];
+   return (
+     <SidebarFolderDrop>
+       <SidebarChromeHeader isElectron={isElectron} />
+-      <SidebarCatFleet machines={catFleet} />
+       <SidebarContent
+         ref={sidebarContentRef}
+         className="min-h-full"
+         fixedHeader={
++          <>
+           <SidebarGroup className="z-[1]">
+             <SidebarThreadHeader
+               hasProjects={projectGroups.length > 0}
+@@ -3380,6 +3384,8 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
+               onClearSearch={clearThreadSearch}
+             />
+           </SidebarGroup>
++          <SidebarCatFleet machines={catFleet} limit={catFleetLimit} />
++          </>
+         }
+       >
+         <SidebarGroup className="flex-1" role="presentation">
+diff --git a/apps/web/src/components/settings/AppearanceSettingsPanel.tsx b/apps/web/src/components/settings/AppearanceSettingsPanel.tsx
+index 1bb96d39c9794dbda0f8473ae61f700038c4bf67..6f77438fc2665ed3c1e8a7cfe3d9aca2f1294787 100644
+--- a/apps/web/src/components/settings/AppearanceSettingsPanel.tsx
++++ b/apps/web/src/components/settings/AppearanceSettingsPanel.tsx
+@@ -38,6 +38,7 @@ import { AdvancedSettings } from "./AdvancedSettings";
+ import { PanelAnimationsPreview } from "./PanelAnimationsPreview";
+ import { TypographySection } from "./TypographySettings";
+ import { ThreadDetailsItemsRow } from "./ThreadDetailsItemsRow";
++import { CatFleetSettingsRow } from "./CatFleetSettingsRow";
+ 
+ const ENVIRONMENT_IDENTIFICATION_LABELS: Record<EnvironmentIdentificationMode, string> = {
+   artwork: msg("Artwork"),
+@@ -344,6 +345,7 @@ export function AppearanceSettingsPanel() {
+           }
+         />
+         <ThreadDetailsItemsRow />
++        <CatFleetSettingsRow />
+         <SettingsRow
+           {...searchableSetting("effort-display")}
+           description={gt(
+diff --git a/apps/web/src/components/settings/CatFleetSettingsRow.browser.test.tsx b/apps/web/src/components/settings/CatFleetSettingsRow.browser.test.tsx
+new file mode 100644
+index 0000000000000000000000000000000000000000..639e66f60b259f474b3768fddbf3515933cbac49
+--- /dev/null
++++ b/apps/web/src/components/settings/CatFleetSettingsRow.browser.test.tsx
+@@ -0,0 +1,28 @@
++import { DEFAULT_CLIENT_SETTINGS } from "@t3tools/contracts";
++import { expect, it, vi } from "vite-plus/test";
++
++import { render } from "../../../test/render";
++import { __setClientSettingsForTests, getClientSettings } from "../../hooks/useSettings";
++import { CatFleetSettingsRow } from "./CatFleetSettingsRow";
++
++it("picks how many cat planets show, and turns them off", async () => {
++  using stack = new DisposableStack();
++  const previousSettings = getClientSettings();
++  stack.defer(() => __setClientSettingsForTests(previousSettings));
++  __setClientSettingsForTests(DEFAULT_CLIENT_SETTINGS);
++  await using screen = await render(<CatFleetSettingsRow />);
++  const count = screen.getByRole("combobox", { name: "How many cat planets to show" });
++  const shown = screen.getByRole("switch", { name: "Show cat planets" });
++
++  // The row renders without the app stylesheet, so the switch has no size for a pointer to hit.
++  shown.element().dispatchEvent(new MouseEvent("click", { bubbles: true }));
++  await vi.waitFor(() => expect(getClientSettings().sidebarCatFleetEnabled).toBe(false));
++  await expect.element(count).toBeDisabled();
++  shown.element().dispatchEvent(new MouseEvent("click", { bubbles: true }));
++  await vi.waitFor(() => expect(getClientSettings().sidebarCatFleetEnabled).toBe(true));
++
++  await expect.element(count).toHaveTextContent("Up to 8");
++  await count.click();
++  await screen.getByRole("option", { name: "Up to 4" }).click();
++  await vi.waitFor(() => expect(getClientSettings().sidebarCatFleetLimit).toBe(4));
++});
+diff --git a/apps/web/src/components/settings/CatFleetSettingsRow.tsx b/apps/web/src/components/settings/CatFleetSettingsRow.tsx
+new file mode 100644
+index 0000000000000000000000000000000000000000..9bd2f9eabf7cacdb22efc50e01bcec6b3ef85fd6
+--- /dev/null
++++ b/apps/web/src/components/settings/CatFleetSettingsRow.tsx
+@@ -0,0 +1,79 @@
++/* oxlint-disable t3code/no-untranslated-copy -- Catgirl Code setting, English only: upstream's catalogs stay untouched */
++import {
++  DEFAULT_CLIENT_SETTINGS,
++  MAX_SIDEBAR_CAT_FLEET_LIMIT,
++  type SidebarCatFleetLimit,
++} from "@t3tools/contracts/settings";
++
++import { updateClientSettings, useClientSettings } from "../../hooks/useSettings";
++import { Select, SelectItem, SelectPopup, SelectTrigger, SelectValue } from "../ui/select";
++import { Switch } from "../ui/switch";
++import { SettingResetButton, SettingsRow } from "./settingsLayout";
++
++// Whole rows of four at the usual sidebar width. The last choice shows every machine.
++const LIMITS: readonly SidebarCatFleetLimit[] = [4, 8, 12, 16, MAX_SIDEBAR_CAT_FLEET_LIMIT];
++
++/** Whether the sidebar draws machines as cat planets, and how many cells they may take. */
++export function CatFleetSettingsRow() {
++  const enabled = useClientSettings((s) => s.sidebarCatFleetEnabled);
++  const limit = useClientSettings((s) => s.sidebarCatFleetLimit);
++  const label = (value: number) => (value >= MAX_SIDEBAR_CAT_FLEET_LIMIT ? "All" : `Up to ${value}`);
++  const isDefault =
++    enabled === DEFAULT_CLIENT_SETTINGS.sidebarCatFleetEnabled &&
++    limit === DEFAULT_CLIENT_SETTINGS.sidebarCatFleetLimit;
++  return (
++    <SettingsRow
++      title="Cat planets"
++      description="Show your machines as cats at the top of the sidebar, busiest first. Running threads orbit them."
++      resetAction={
++        isDefault ? null : (
++          <SettingResetButton
++            ariaLabel="Reset cat planets to default"
++            onClick={() =>
++              updateClientSettings({
++                sidebarCatFleetEnabled: DEFAULT_CLIENT_SETTINGS.sidebarCatFleetEnabled,
++                sidebarCatFleetLimit: DEFAULT_CLIENT_SETTINGS.sidebarCatFleetLimit,
++              })
++            }
++          />
++        )
++      }
++      control={
++        <div className="flex w-full items-center gap-3 sm:w-auto">
++          <div className="min-w-0 flex-1 sm:w-28 sm:flex-none">
++            <Select
++              disabled={!enabled}
++              value={String(limit)}
++              onValueChange={(value) => {
++                const next = LIMITS.find((candidate) => String(candidate) === value);
++                if (next !== undefined) void updateClientSettings({ sidebarCatFleetLimit: next });
++              }}
++            >
++              <SelectTrigger
++                size="sm"
++                className="w-full min-w-0"
++                aria-label="How many cat planets to show"
++              >
++                <SelectValue>{label(limit)}</SelectValue>
++              </SelectTrigger>
++              <SelectPopup align="end" alignItemWithTrigger={false}>
++                {LIMITS.map((value) => (
++                  <SelectItem key={value} value={String(value)}>
++                    {label(value)}
++                  </SelectItem>
++                ))}
++              </SelectPopup>
++            </Select>
++          </div>
++          <Switch
++            checked={enabled}
++            onCheckedChange={(checked) =>
++              void updateClientSettings({ sidebarCatFleetEnabled: Boolean(checked) })
++            }
++            aria-label="Show cat planets"
++          />
++        </div>
++      }
++    />
++  );
++}
+diff --git a/apps/web/src/components/sidebar/SidebarCatFleet.logic.ts b/apps/web/src/components/sidebar/SidebarCatFleet.logic.ts
+index 6b1045296b02691c4d3057596b98757fb3819f83..19a6ec4ccaa5995c579ba599c9606d45ac50f89b 100644
+--- a/apps/web/src/components/sidebar/SidebarCatFleet.logic.ts
++++ b/apps/web/src/components/sidebar/SidebarCatFleet.logic.ts
+@@ -101,9 +101,6 @@ export function catFleetActivity(machine: CatFleetMachine): number {
+   return machine.bodies.reduce((total, body) => total + (body.running ? 1 : 0) + body.subagents, 0);
+ }
+ 
+-/** How many cells the fleet takes in the sidebar unless the user picks another number. */
+-export const CAT_FLEET_DEFAULT_LIMIT = 8;
+-
+ /**
+  * Busiest machines first, then those with the most threads waiting, then idle ones, with
+  * offline machines last. Equal machines keep catalog order. The fleet fills at most `limit`
+diff --git a/apps/web/src/components/sidebar/SidebarCatFleet.tsx b/apps/web/src/components/sidebar/SidebarCatFleet.tsx
+index f5c2a00382a2a2ec3ba1162c431106d7a62ca930..e7f4e6164f9e0c05025c4e64338b1a105a50cb61 100644
+--- a/apps/web/src/components/sidebar/SidebarCatFleet.tsx
++++ b/apps/web/src/components/sidebar/SidebarCatFleet.tsx
+@@ -8,7 +8,6 @@ import { ThreadHoverCard, ThreadHoverCardPopup } from "../ThreadHoverCard";
+ import { Tooltip, TooltipProvider, TooltipTrigger } from "../ui/tooltip";
+ import {
+   arrangeCatFleet,
+-  CAT_FLEET_DEFAULT_LIMIT,
+   catFleetActivity,
+   fleetHashUnit,
+   type CatFleetBody,
+@@ -71,11 +70,11 @@ const UNSQUASH = `scaleY(${1 / ORBIT_SQUASH})`;
+  */
+ export const SidebarCatFleet = memo(function SidebarCatFleet({
+   machines,
+-  limit = CAT_FLEET_DEFAULT_LIMIT,
++  limit,
+ }: {
+   machines: readonly CatFleetMachine[];
+-  /** How many cells the fleet may take. Zero hides it. */
+-  limit?: number;
++  /** How many cells the fleet may take. */
++  limit: number;
+ }) {
+   const [expanded, setExpanded] = useState(false);
+   if (machines.length === 0 || limit <= 0) return null;
+diff --git a/packages/contracts/src/settings.ts b/packages/contracts/src/settings.ts
+index a5b3c08e00456bcc55dae08284f3a51a311f3365..76a350604cab7c0709862c81765096f133496b3e 100644
+--- a/packages/contracts/src/settings.ts
++++ b/packages/contracts/src/settings.ts
+@@ -173,6 +173,14 @@ export const InterfaceFontSize = Schema.Int.check(
+ export type InterfaceFontSize = typeof InterfaceFontSize.Type;
+ export const DEFAULT_INTERFACE_FONT_SIZE: InterfaceFontSize = 16;
+ 
++export const MIN_SIDEBAR_CAT_FLEET_LIMIT = 1;
++export const MAX_SIDEBAR_CAT_FLEET_LIMIT = 48;
++export const SidebarCatFleetLimit = Schema.Int.check(
++  Schema.isBetween({ minimum: MIN_SIDEBAR_CAT_FLEET_LIMIT, maximum: MAX_SIDEBAR_CAT_FLEET_LIMIT }),
++);
++export type SidebarCatFleetLimit = typeof SidebarCatFleetLimit.Type;
++export const DEFAULT_SIDEBAR_CAT_FLEET_LIMIT: SidebarCatFleetLimit = 8;
++
+ export const MIN_PROMPT_FONT_SIZE = 12;
+ export const MAX_PROMPT_FONT_SIZE = 20;
+ export const PromptFontSize = Schema.Int.check(
+@@ -572,6 +580,11 @@ export const ClientSettingsSchema = Schema.Struct({
+   environmentLabelOverrides: Schema.Record(TrimmedNonEmptyString, TrimmedNonEmptyString).pipe(
+     Schema.withDecodingDefault(Effect.succeed({})),
+   ),
++  // The machines drawn as cat planets in the sidebar, and how many cells they may take.
++  sidebarCatFleetEnabled: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
++  sidebarCatFleetLimit: SidebarCatFleetLimit.pipe(
++    Schema.withDecodingDefault(Effect.succeed(DEFAULT_SIDEBAR_CAT_FLEET_LIMIT)),
++  ),
+   sidebarProjectGroupingMode: SidebarProjectGroupingMode.pipe(
+     Schema.withDecodingDefault(Effect.succeed(DEFAULT_SIDEBAR_PROJECT_GROUPING_MODE)),
+   ),
+@@ -2180,6 +2193,8 @@ export const ClientSettingsPatch = Schema.Struct({
+   environmentLabelOverrides: Schema.optionalKey(
+     Schema.Record(TrimmedNonEmptyString, TrimmedNonEmptyString),
+   ),
++  sidebarCatFleetEnabled: Schema.optionalKey(Schema.Boolean),
++  sidebarCatFleetLimit: Schema.optionalKey(SidebarCatFleetLimit),
+   sidebarProjectGroupingMode: Schema.optionalKey(SidebarProjectGroupingMode),
+   sidebarProjectGroupingOverrides: Schema.optionalKey(
+     Schema.Record(TrimmedNonEmptyString, SidebarProjectGroupingMode),

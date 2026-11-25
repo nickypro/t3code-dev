@@ -1,0 +1,594 @@
+diff --git a/apps/mobile/modules/t3-client-certificates/android/src/main/java/expo/modules/t3clientcertificates/CertificateTls.kt b/apps/mobile/modules/t3-client-certificates/android/src/main/java/expo/modules/t3clientcertificates/CertificateTls.kt
+index 16ea65212f3c52e6ca2c607fd6ab223cb37882b1..c038c7f983ef057f70fdf80714d7e5ab8be55600 100644
+--- a/apps/mobile/modules/t3-client-certificates/android/src/main/java/expo/modules/t3clientcertificates/CertificateTls.kt
++++ b/apps/mobile/modules/t3-client-certificates/android/src/main/java/expo/modules/t3clientcertificates/CertificateTls.kt
+@@ -10,20 +10,50 @@ import javax.net.ssl.HostnameVerifier
+ import javax.net.ssl.SSLEngine
+ import javax.net.ssl.SSLSocketFactory
+ import javax.net.ssl.X509ExtendedKeyManager
++import android.content.SharedPreferences
+ import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
+ import okhttp3.OkHttpClient
+ 
+ /** HTTPS and WSS share an identity; paths, credentials and fragments never enter the key. */
+ internal fun certificateOrigin(url: String): String? {
+-  val normalized = if (url.startsWith("wss://", true)) "https://" + url.substring(6) else url
++  val plain = if (url.startsWith("wss://", true)) "https://" + url.substring(6) else url
++  // `https://*.example.com/` is a wildcard identity: it covers every subdomain (any depth) on the
++  // default port. OkHttp may reject '*' in a host, so parse with a placeholder label.
++  val wildcard = plain.startsWith(WILDCARD_PREFIX, true)
++  val normalized = if (wildcard) "https://$WILDCARD_LABEL." + plain.substring(10) else plain
+   val parsed =
+     normalized
+       .toHttpUrlOrNull()
+       ?.takeIf { it.scheme == "https" && it.username.isEmpty() && it.password.isEmpty() }
+       ?: return null
+-  return parsed.newBuilder().encodedPath("/").query(null).fragment(null).build().toString()
++  if (wildcard && (parsed.port != 443 || parsed.host.split('.').size < 3)) return null
++  val origin = parsed.newBuilder().encodedPath("/").query(null).fragment(null).build().toString()
++  return if (wildcard) WILDCARD_PREFIX + origin.substring("https://$WILDCARD_LABEL.".length) else origin
+ }
+ 
++private const val WILDCARD_PREFIX = "https://*."
++private const val WILDCARD_LABEL = "t3-wildcard-2a"
++
++internal fun isWildcardOrigin(origin: String) = origin.startsWith(WILDCARD_PREFIX)
++
++/** Exact origin first, then wildcard parents nearest first. Wildcards never cover a bare TLD. */
++internal fun certificateLookupKeys(origin: String): List<String> {
++  if (isWildcardOrigin(origin)) return listOf(origin)
++  val parsed = origin.toHttpUrlOrNull() ?: return listOf(origin)
++  val host = parsed.host
++  val keys = mutableListOf(origin)
++  if (parsed.port == 443 && !host.contains(':') && host.any { it.isLetter() }) {
++    val labels = host.split('.')
++    for (i in 1 until labels.size - 1) {
++      keys += WILDCARD_PREFIX + labels.drop(i).joinToString(".") + "/"
++    }
++  }
++  return keys
++}
++
++internal fun resolveCertificateAlias(preferences: SharedPreferences, origin: String): String? =
++  certificateLookupKeys(origin).firstNotNullOfOrNull { preferences.getString(it, null) }
++
+ internal class SelectedIdentity(
+   private val alias: String,
+   private val key: PrivateKey,
+diff --git a/apps/mobile/modules/t3-client-certificates/android/src/main/java/expo/modules/t3clientcertificates/T3CertificateTransport.kt b/apps/mobile/modules/t3-client-certificates/android/src/main/java/expo/modules/t3clientcertificates/T3CertificateTransport.kt
+index 394d0eb37932d228661214e4e2c627e735459f5e..9ec32593a4e562f57c936e12692999fe0c038b4d 100644
+--- a/apps/mobile/modules/t3-client-certificates/android/src/main/java/expo/modules/t3clientcertificates/T3CertificateTransport.kt
++++ b/apps/mobile/modules/t3-client-certificates/android/src/main/java/expo/modules/t3clientcertificates/T3CertificateTransport.kt
+@@ -52,12 +52,8 @@ class T3CertificateTransport private constructor(private val context: Context) {
+         lock,
+         ::generation
+       )
+-    OkHttpClientProvider.setOkHttpClientFactory(
+-      OkHttpClientFactory {
+-        // Networking and Fresco must not open separate caches over the same directory.
+-        configure(OkHttpClientProvider.createClientBuilder()).build()
+-      }
+-    )
++    // Networking and Fresco must not open separate caches over the same directory.
++    OkHttpClientProvider.setOkHttpClientFactory(CertificateClientFactory(null))
+     val customize = CustomClientBuilder { builder -> configure(builder) }
+     NetworkingModule.setCustomClientBuilder(customize)
+     WebSocketModule.setCustomClientBuilder(customize)
+@@ -80,9 +76,34 @@ class T3CertificateTransport private constructor(private val context: Context) {
+     generations.invalidateAll()
+   }
+ 
++  /** Wraps another factory so its interceptors stay while every client gets this transport. */
++  private inner class CertificateClientFactory(private val inner: OkHttpClientFactory?) :
++    OkHttpClientFactory {
++    override fun createNewNetworkModuleClient(): OkHttpClient =
++      configure(
++          inner?.createNewNetworkModuleClient()?.newBuilder()
++            ?: OkHttpClientProvider.createClientBuilder()
++        )
++        .build()
++  }
++
++  // expo-app-metrics replaces the factory from an Expo lifecycle listener after install().
++  internal fun reassertFactory() {
++    val current =
++      runCatching {
++          OkHttpClientProvider::class.java
++            .getDeclaredField("factory")
++            .apply { isAccessible = true }
++            .get(null) as OkHttpClientFactory?
++        }
++        .getOrNull()
++    if (current is CertificateClientFactory) return
++    OkHttpClientProvider.setOkHttpClientFactory(CertificateClientFactory(current))
++  }
++
+   @Suppress("TooGenericExceptionCaught") // Any KeyChain or TLS setup failure fails the connection.
+   private fun identityFactory(origin: String): SSLSocketFactory {
+-    val alias = preferences.getString(origin, null) ?: return defaultTls.socketFactory
++    val alias = resolveCertificateAlias(preferences, origin) ?: return defaultTls.socketFactory
+     return try {
+       val key =
+         checkNotNull(KeyChain.getPrivateKey(context, alias)) {
+@@ -114,5 +135,12 @@ class T3CertificateTransport private constructor(private val context: Context) {
+     @Synchronized
+     fun install(context: Context): T3CertificateTransport =
+       instance ?: T3CertificateTransport(context.applicationContext).also { instance = it }
++
++    /** Call after Expo lifecycle listeners ran, so a factory they installed is wrapped. */
++    @JvmStatic
++    @Synchronized
++    fun reassert(context: Context) {
++      install(context).reassertFactory()
++    }
+   }
+ }
+diff --git a/apps/mobile/modules/t3-client-certificates/android/src/main/java/expo/modules/t3clientcertificates/T3ClientCertificatesModule.kt b/apps/mobile/modules/t3-client-certificates/android/src/main/java/expo/modules/t3clientcertificates/T3ClientCertificatesModule.kt
+index cbd70a8271aed04f26ffa085de12a86edf577c76..83259d442db507a640bb506de57fcc43d6fd3782 100644
+--- a/apps/mobile/modules/t3-client-certificates/android/src/main/java/expo/modules/t3clientcertificates/T3ClientCertificatesModule.kt
++++ b/apps/mobile/modules/t3-client-certificates/android/src/main/java/expo/modules/t3clientcertificates/T3ClientCertificatesModule.kt
+@@ -63,7 +63,7 @@ class T3ClientCertificatesModule : Module() {
+     Events("transferProgress", "changed")
+     OnCreate { create() }
+     Function("getAlias") { url: String ->
+-      certificateOrigin(url)?.let { preferences.getString(it, null) }
++      certificateOrigin(url)?.let { resolveCertificateAlias(preferences, it) }
+     }
+     AsyncFunction("choose") { url: String, promise: Promise -> choose(url, promise) }
+     AsyncFunction("remove") { url: String -> remove(url) }
+@@ -142,7 +142,7 @@ class T3ClientCertificatesModule : Module() {
+         { alias -> execute(promise) { saveChoice(origin, alias, promise) } },
+         null,
+         null,
+-        uri.host,
++        uri.host?.removePrefix("*."),
+         if (uri.port == -1) 443 else uri.port,
+         preferences.getString(origin, null)
+       )
+@@ -191,7 +191,9 @@ class T3ClientCertificatesModule : Module() {
+   private fun createTransfer(url: String): String {
+     val origin = requireNotNull(certificateOrigin(url)) { "HTTPS URL required" }
+     return synchronized(lock) {
+-      check(preferences.contains(origin)) { "No client certificate selected for this host" }
++      check(resolveCertificateAlias(preferences, origin) != null) {
++        "No client certificate selected for this host"
++      }
+       UUID.randomUUID().toString().also { id ->
+         transfers[id] = Transfer(url, origin, transport.generation(origin))
+       }
+@@ -222,7 +224,7 @@ class T3ClientCertificatesModule : Module() {
+       if (upload) request.post(progressBody(id, target, contentType))
+       val call =
+         synchronized(lock) {
+-          check(preferences.contains(transfer.origin)) {
++          check(resolveCertificateAlias(preferences, transfer.origin) != null) {
+             "Certificate selection changed. Try again."
+           }
+           check(transfers[id] === transfer) { "Transfer cancelled" }
+@@ -309,6 +311,15 @@ class T3ClientCertificatesModule : Module() {
+   }
+ 
+   private fun retire(origin: String) {
++    if (isWildcardOrigin(origin)) {
++      // A wildcard may change the identity of any host: drop everything.
++      transport.invalidateAll()
++      calls.values.forEach { it.cancel() }
++      sockets.keys.forEach { runCatching { it.close() } }
++      sockets.clear()
++      fileClient.connectionPool.evictAll()
++      return
++    }
+     transport.invalidate(origin)
+     calls.values
+       .filter { certificateOrigin(it.request().url.toString()) == origin }
+diff --git a/apps/mobile/plugins/withAndroidClientCertificates.cjs b/apps/mobile/plugins/withAndroidClientCertificates.cjs
+index bc3fc2511cb605970b4c8b728351114e1d80a881..f2bdaa04a1be0c99b27e6da78d04a010de59edc2 100644
+--- a/apps/mobile/plugins/withAndroidClientCertificates.cjs
++++ b/apps/mobile/plugins/withAndroidClientCertificates.cjs
+@@ -1,6 +1,26 @@
+ const { withMainApplication } = require("expo/config-plugins");
+ 
+ const install = "expo.modules.t3clientcertificates.T3CertificateTransport.install(this)";
++const reassert = "expo.modules.t3clientcertificates.T3CertificateTransport.reassert(this)";
++const lifecycle = /ApplicationLifecycleDispatcher\.onApplicationCreate\(this\)[ \t]*;?/g;
++
++// Expo lifecycle listeners (expo-app-metrics) replace React Native's OkHttp factory after the
++// early install. Re-assert right after them, wrapping theirs, or Expo fetch sends no certificate.
++function reassertAfterLifecycle(source) {
++  const matches = [...source.matchAll(lifecycle)];
++  if (matches.length !== 1)
++    throw new Error("Cannot re-assert client certificates after Expo lifecycle startup");
++  const offset = matches[0].index + matches[0][0].length;
++  if (source.includes(reassert)) {
++    if (!source.slice(offset).trimStart().startsWith(reassert) || source.split(reassert).length !== 2)
++      throw new Error(
++        "Client certificate transport must be re-asserted immediately after Expo lifecycle startup",
++      );
++    return source;
++  }
++  const newline = source.includes("\r\n") ? "\r\n" : "\n";
++  return source.slice(0, offset) + `${newline}    ${reassert}` + source.slice(offset);
++}
+ 
+ function installCertificateTransport(source) {
+   // Anchor to the method body, not a comment or another lifecycle method. Fail closed if
+@@ -23,11 +43,17 @@ function installCertificateTransport(source) {
+   return source.slice(0, offset) + `${newline}    ${install}` + source.slice(offset);
+ }
+ 
++function wireCertificateTransport(source) {
++  return reassertAfterLifecycle(installCertificateTransport(source));
++}
++
+ module.exports = (config) =>
+   withMainApplication(config, (next) => {
+     if (next.modResults.language !== "kt")
+       throw new Error("Client certificate startup requires Kotlin MainApplication");
+-    next.modResults.contents = installCertificateTransport(next.modResults.contents);
++    next.modResults.contents = wireCertificateTransport(next.modResults.contents);
+     return next;
+   });
+ module.exports.installCertificateTransport = installCertificateTransport;
++module.exports.reassertAfterLifecycle = reassertAfterLifecycle;
++module.exports.wireCertificateTransport = wireCertificateTransport;
+diff --git a/apps/mobile/plugins/withAndroidClientCertificates.test.ts b/apps/mobile/plugins/withAndroidClientCertificates.test.ts
+index f9cf77d07b2ea722024048397165c3a9d875f113..643d684b7cc349b0a238603df16d347b81f33cdb 100644
+--- a/apps/mobile/plugins/withAndroidClientCertificates.test.ts
++++ b/apps/mobile/plugins/withAndroidClientCertificates.test.ts
+@@ -2,9 +2,12 @@ import * as NodeModule from "node:module";
+ import { describe, expect, it } from "vite-plus/test";
+ 
+ const require = NodeModule.createRequire(import.meta.url);
+-const { installCertificateTransport } = require("./withAndroidClientCertificates.cjs") as {
+-  installCertificateTransport(source: string): string;
+-};
++const { installCertificateTransport, wireCertificateTransport } =
++  require("./withAndroidClientCertificates.cjs") as {
++    installCertificateTransport(source: string): string;
++    wireCertificateTransport(source: string): string;
++  };
++const reassert = "expo.modules.t3clientcertificates.T3CertificateTransport.reassert(this)";
+ const install = "expo.modules.t3clientcertificates.T3CertificateTransport.install(this)";
+ const template = `class MainApplication : Application(), ReactApplication {
+   override fun onCreate() {
+@@ -57,4 +60,25 @@ describe("Android certificate startup prebuild", () => {
+       "Client certificate transport must be installed immediately after super.onCreate()",
+     );
+   });
++
++  it("re-asserts after Expo lifecycle listeners, which replace the OkHttp factory", () => {
++    const generated = wireCertificateTransport(template);
++    expect(generated).toBe(
++      template
++        .replace("super.onCreate()", `super.onCreate()\n    ${install}`)
++        .replace(
++          "ApplicationLifecycleDispatcher.onApplicationCreate(this)",
++          `ApplicationLifecycleDispatcher.onApplicationCreate(this)\n    ${reassert}`,
++        ),
++    );
++    expect(wireCertificateTransport(generated)).toBe(generated);
++  });
++
++  it("rejects a template without the Expo lifecycle call", () => {
++    expect(() =>
++      wireCertificateTransport(
++        template.replace("    ApplicationLifecycleDispatcher.onApplicationCreate(this)\n", ""),
++      ),
++    ).toThrow("Cannot re-assert client certificates after Expo lifecycle startup");
++  });
+ });
+diff --git a/apps/mobile/src/Stack.tsx b/apps/mobile/src/Stack.tsx
+index 0e8ebc9b9ad071d231bb4e880d776b825b8b756a..38692acbca128a7f55835c703f0fc095f54d716d 100644
+--- a/apps/mobile/src/Stack.tsx
++++ b/apps/mobile/src/Stack.tsx
+@@ -144,6 +144,7 @@ import { WorkflowStepSheet } from "./features/workflows/WorkflowStepSheet";
+ import { SettingsAboutRouteScreen } from "./features/settings/SettingsAboutRouteScreen";
+ import { SettingsNotificationsRouteScreen } from "./features/settings/SettingsNotificationsRouteScreen";
+ import { SettingsSshRouteScreen } from "./features/settings/SettingsSshRouteScreen";
++import { SettingsClientCertificateRouteScreen } from "./features/settings/SettingsClientCertificateRouteScreen";
+ import { SettingsRouteScreen } from "./features/settings/SettingsRouteScreen";
+ import { SettingsLabsRouteScreen } from "./features/settings/ThreadSettingsSections";
+ import { SettingsEnvironmentFilterProvider } from "./features/settings/settings-environment-filter";
+@@ -182,6 +183,7 @@ const ROUTE_TITLES: Readonly<Record<string, string>> = {
+   SettingsProviderAccounts: msg("Providers"),
+   SettingsEnvironmentMaintenance: msg("Maintenance"),
+   SettingsNotifications: msg("Notifications"),
++  SettingsClientCertificate: msg("Client certificate"),
+   SettingsSsh: "SSH",
+   SettingsThreads: msg("Threads"),
+   SettingsAbout: msg("About"),
+@@ -302,6 +304,11 @@ const SETTINGS_SCREENS = {
+     linking: "settings/notifications",
+     options: settingsPage(),
+   }),
++  SettingsClientCertificate: createNativeStackScreen({
++    screen: SettingsClientCertificateRouteScreen,
++    linking: "settings/client-certificate",
++    options: settingsPage(),
++  }),
+   SettingsSsh: createNativeStackScreen({
+     screen: SettingsSshRouteScreen,
+     linking: "settings/ssh",
+diff --git a/apps/mobile/src/features/connection/ClientCertificateField.tsx b/apps/mobile/src/features/connection/ClientCertificateField.tsx
+index 195e640699dc3702e1aaa12f6f8d2f55cd768236..28507b2af890e8906bb3d62ab34e873017f4dcd1 100644
+--- a/apps/mobile/src/features/connection/ClientCertificateField.tsx
++++ b/apps/mobile/src/features/connection/ClientCertificateField.tsx
+@@ -18,8 +18,14 @@ function subscribe(listener: () => void) {
+   return () => subscription.remove();
+ }
+ 
+-export function ClientCertificateField(props: { host: string; disabled?: boolean }) {
+-  const endpoint = buildPairingUrl(props.host, "certificate-origin");
++export function ClientCertificateField(props: {
++  host: string;
++  disabled?: boolean;
++  /** Certificate origin used as-is, e.g. a wildcard `https://*.example.com/`. */
++  endpoint?: string;
++  description?: string;
++}) {
++  const endpoint = props.endpoint ?? buildPairingUrl(props.host, "certificate-origin");
+   const alias = useSyncExternalStore(
+     subscribe,
+     () => selectedClientCertificate(endpoint),
+@@ -66,8 +72,9 @@ export function ClientCertificateField(props: { host: string; disabled?: boolean
+             Client certificate (optional)
+           </Text>
+           <Text className="text-sm text-foreground-muted">
+-            {alias ?? "None selected"}. Applies to this HTTPS host and port, including other
+-            environments using the same address.
++            {alias ?? "None selected"}.{" "}
++            {props.description ??
++              "Applies to this HTTPS host and port, including other environments using the same address."}
+           </Text>
+           <Pressable
+             accessibilityRole="button"
+diff --git a/apps/mobile/src/features/connection/ConnectionEnvironmentRow.tsx b/apps/mobile/src/features/connection/ConnectionEnvironmentRow.tsx
+index 8aa5864991ca8dc61d9d6d6c38ee903faa0f7ac3..23a75a6def7b509c3c66087f3dc36d4aa18a3252 100644
+--- a/apps/mobile/src/features/connection/ConnectionEnvironmentRow.tsx
++++ b/apps/mobile/src/features/connection/ConnectionEnvironmentRow.tsx
+@@ -2,6 +2,7 @@ import { errorDisplayMessage } from "@t3tools/client-runtime/errors";
+ import { msg, T, useGT, useMessages } from "gt-react-native";
+ import * as Dialog from "../../components/ui/Dialog";
+ import { ClientCertificateField } from "./ClientCertificateField";
++import { relayCertificateOrigin, wildcardCertificateOrigin } from "../../lib/certificateScope";
+ import { ConnectionTraceId } from "./ConnectionTraceId";
+ import { SymbolView } from "../../components/ui/AppSymbol";
+ import { hasSavedBearerRoute, hostFreezeNotice } from "@t3tools/client-runtime/connection";
+@@ -71,6 +72,9 @@ export function ConnectionEnvironmentRow(props: {
+     serverEnvironment.configValueAtom(props.environment.environmentId),
+   );
+   const unsupported = props.environment.connectionState === "unsupported";
++  const relayCertificateScope = props.environment.isRelayManaged
++    ? (wildcardCertificateOrigin(props.environment.displayUrl) ?? relayCertificateOrigin())
++    : null;
+   const presentation = useAtomValue(
+     environmentPresentations.presentationAtom(props.environment.environmentId),
+   );
+@@ -232,11 +236,20 @@ export function ConnectionEnvironmentRow(props: {
+             />
+           ) : null}
+           {props.environment.isRelayManaged ? (
+-            <Text className="text-sm text-foreground-muted">
+-              {gt("Managed by {product}. Tunnel details update automatically.", {
+-                product: "T3 Connect",
+-              })}
+-            </Text>
++            <>
++              <Text className="text-sm text-foreground-muted">
++                {gt("Managed by {product}. Tunnel details update automatically.", {
++                  product: "T3 Connect",
++                })}
++              </Text>
++              {relayCertificateScope ? (
++                <ClientCertificateField
++                  host={relayCertificateScope}
++                  endpoint={relayCertificateScope}
++                  description={`Applies to every machine under ${relayCertificateScope.slice(8, -1)}, including T3 Connect machines added later. A certificate chosen for one exact address takes priority.`}
++                />
++              ) : null}
++            </>
+           ) : (
+             <>
+               <ConnectionFormField
+diff --git a/apps/mobile/src/features/settings/SettingsClientCertificateRouteScreen.tsx b/apps/mobile/src/features/settings/SettingsClientCertificateRouteScreen.tsx
+new file mode 100644
+index 0000000000000000000000000000000000000000..6be2c83c684ca175e6aec7df2c2fa16f878e0595
+--- /dev/null
++++ b/apps/mobile/src/features/settings/SettingsClientCertificateRouteScreen.tsx
+@@ -0,0 +1,104 @@
++import { useState, useSyncExternalStore } from "react";
++import { Pressable, View } from "react-native";
++import { useSafeAreaInsets } from "react-native-safe-area-context";
++
++import { AppText as Text } from "../../components/ui/AppText";
++import * as Dialog from "../../components/ui/Dialog";
++import { ScreenScrollView as ScrollView } from "../../components/ui/ScreenScrollView";
++import { relayCertificateOrigin } from "../../lib/certificateScope";
++import {
++  chooseClientCertificate,
++  clientCertificatesAvailable,
++  onClientCertificateChange,
++  removeClientCertificate,
++  selectedClientCertificate,
++} from "../../lib/clientCertificates";
++import { SettingsScreen } from "./components/SettingsScreen";
++import { SettingsSection } from "./components/SettingsSection";
++
++function subscribe(listener: () => void) {
++  const subscription = onClientCertificateChange(listener);
++  return () => subscription.remove();
++}
++
++export function SettingsClientCertificateRouteScreen() {
++  const insets = useSafeAreaInsets();
++  const origin = relayCertificateOrigin();
++  return (
++    <SettingsScreen title="Client certificate">
++      <ScrollView
++        contentInsetAdjustmentBehavior="automatic"
++        showsVerticalScrollIndicator={false}
++        className="flex-1"
++        contentContainerClassName="gap-6 px-5 pt-4"
++        contentContainerStyle={{ paddingBottom: Math.max(insets.bottom, 18) + 18 }}
++      >
++        {!clientCertificatesAvailable ? (
++          <Text className="px-4 text-foreground-muted">
++            Client certificates need the Android custom build.
++          </Text>
++        ) : origin === null ? (
++          <Text className="px-4 text-foreground-muted">
++            This build has no T3 Connect relay configured.
++          </Text>
++        ) : (
++          <DefaultCertificate origin={origin} />
++        )}
++      </ScrollView>
++    </SettingsScreen>
++  );
++}
++
++function DefaultCertificate({ origin }: { readonly origin: string }) {
++  const domain = origin.slice("https://".length, -1);
++  const alias = useSyncExternalStore(
++    subscribe,
++    () => selectedClientCertificate(origin),
++    () => null,
++  );
++  const [busy, setBusy] = useState(false);
++  const act = (remove: boolean) => {
++    setBusy(true);
++    void (remove ? removeClientCertificate(origin) : chooseClientCertificate(origin))
++      .catch((error: unknown) => {
++        Dialog.alert(
++          "Client certificate",
++          error instanceof Error ? error.message : "Could not select certificate.",
++        );
++      })
++      .finally(() => setBusy(false));
++  };
++  return (
++    <SettingsSection
++      title="Default for T3 Connect machines"
++      footer={`Sent to every machine under ${domain} that asks for one, including machines added later. A certificate chosen for one environment's own address takes priority.`}
++    >
++      <View className="gap-3 px-4 py-4">
++        <View className="gap-1">
++          <Text className="text-sm text-foreground-muted">Selected certificate</Text>
++          <Text className="text-base text-foreground">{alias ?? "None"}</Text>
++        </View>
++        <Pressable
++          accessibilityRole="button"
++          disabled={busy}
++          onPress={() => act(false)}
++          className="rounded-xl bg-input px-4 py-3"
++        >
++          <Text className="text-foreground">
++            {busy ? "Please wait…" : alias ? "Change certificate" : "Select certificate"}
++          </Text>
++        </Pressable>
++        {alias ? (
++          <Pressable
++            accessibilityRole="button"
++            disabled={busy}
++            onPress={() => act(true)}
++            className="px-4 py-2"
++          >
++            <Text className="text-danger-foreground">Remove certificate</Text>
++          </Pressable>
++        ) : null}
++      </View>
++    </SettingsSection>
++  );
++}
+diff --git a/apps/mobile/src/features/settings/SettingsRouteScreen.tsx b/apps/mobile/src/features/settings/SettingsRouteScreen.tsx
+index 14a02ba60d90a595408a58ca642913ed2d0e3bac..2dccbf76b066d9000e657cf6ab1ded93ae9e9bc3 100644
+--- a/apps/mobile/src/features/settings/SettingsRouteScreen.tsx
++++ b/apps/mobile/src/features/settings/SettingsRouteScreen.tsx
+@@ -26,6 +26,7 @@ import { hasCloudPublicConfig } from "../cloud/publicConfig";
+ import { useAdaptiveWorkspaceLayout } from "../layout/adaptive-workspace-context";
+ import { useSavedRemoteConnections } from "../../state/use-remote-environment-registry";
+ import { sshNative } from "../../connection/ssh/native";
++import { clientCertificatesAvailable } from "../../lib/clientCertificates";
+ import { SettingsRow } from "./components/SettingsRow";
+ import { SettingsSection, SettingsSidebarContext } from "./components/SettingsSection";
+ import { SettingsScreen } from "./components/SettingsScreen";
+@@ -159,10 +160,21 @@ function LocalSettingsRouteScreen() {
+   );
+ }
+ 
+-const sshRows: readonly SettingsListRow[] =
+-  sshNative === null
++const sshRows: readonly SettingsListRow[] = [
++  ...(sshNative === null
+     ? []
+-    : [{ id: "SettingsSsh", icon: "terminal", label: "SSH", target: "SettingsSsh" }];
++    : [{ id: "SettingsSsh", icon: "terminal", label: "SSH", target: "SettingsSsh" } as const]),
++  ...(clientCertificatesAvailable
++    ? [
++        {
++          id: "SettingsClientCertificate",
++          icon: { ios: "lock", android: "lock" },
++          label: "Client certificate",
++          target: "SettingsClientCertificate",
++        } as const,
++      ]
++    : []),
++];
+ 
+ function environmentsRow(label: string, count: number): SettingsListRow {
+   return {
+diff --git a/apps/mobile/src/features/settings/components/settings-page-targets.ts b/apps/mobile/src/features/settings/components/settings-page-targets.ts
+index 71b26af356060c85ae77dcf0c0806b3abe2d0ce2..64b893bf55ec3ac1f253d9dabaa809d33118c06b 100644
+--- a/apps/mobile/src/features/settings/components/settings-page-targets.ts
++++ b/apps/mobile/src/features/settings/components/settings-page-targets.ts
+@@ -3,6 +3,7 @@ export const SETTINGS_PAGE_TARGETS = [
+   "SettingsEnvironments",
+   "SettingsNotifications",
+   "SettingsSsh",
++  "SettingsClientCertificate",
+   "SettingsThreads",
+   "SettingsAbout",
+   "SettingsArchive",
+diff --git a/apps/mobile/src/features/settings/settings-search.ts b/apps/mobile/src/features/settings/settings-search.ts
+index 115d6e72d90e8633320282fa028d7c13086b620e..d23f03591e4f7e91e5a72a6d900ff8045f129209 100644
+--- a/apps/mobile/src/features/settings/settings-search.ts
++++ b/apps/mobile/src/features/settings/settings-search.ts
+@@ -28,6 +28,13 @@ const SETTINGS_SEARCH_TERMS = {
+     msg("live activity", { $context: "settings search keyword" }),
+     msg("agent activity", { $context: "settings search keyword" }),
+   ],
++  SettingsClientCertificate: [
++    "mtls",
++    msg("client certificate", { $context: "settings search keyword" }),
++    "cloudflare access",
++    "p12",
++    "keychain",
++  ],
+   SettingsSsh: [
+     msg("ssh key", { $context: "settings search keyword" }),
+     msg("ssh config", { $context: "settings search keyword" }),
+diff --git a/apps/mobile/src/lib/certificateScope.ts b/apps/mobile/src/lib/certificateScope.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..e0ff1faf083e2781ad258ee6a81df0d059e40ff3
+--- /dev/null
++++ b/apps/mobile/src/lib/certificateScope.ts
+@@ -0,0 +1,19 @@
++import { resolveCloudPublicConfig } from "../features/cloud/publicConfig";
++
++/** `https://*.parent/` for an HTTPS address, so one certificate covers every sibling machine. */
++export function wildcardCertificateOrigin(address: string): string | null {
++  try {
++    const url = new URL(address);
++    if (url.protocol !== "https:" || (url.port && url.port !== "443")) return null;
++    const labels = url.hostname.split(".");
++    if (labels.length < 3 || labels.every((label) => /^\d+$/.test(label))) return null;
++    return `https://*.${labels.slice(1).join(".")}/`;
++  } catch {
++    return null;
++  }
++}
++
++/** The default certificate scope: every machine under the T3 Connect relay's parent domain. */
++export function relayCertificateOrigin(): string | null {
++  return wildcardCertificateOrigin(resolveCloudPublicConfig().relay.url ?? "");
++}

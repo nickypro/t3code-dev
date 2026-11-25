@@ -1,16 +1,16 @@
 diff --git a/apps/web/src/components/settings/ConnectionsSettings.tsx b/apps/web/src/components/settings/ConnectionsSettings.tsx
-index 8aa8ecb644577155d120a77126f67e7875028614..dbc841288445c91052479aa1097fe9493f1fa86a 100644
+index 08aeb18c1513ff474c0ff83a11f8548b13c9c9ea..037acbe246a85e43e03cb061682bf9c7972ef168 100644
 --- a/apps/web/src/components/settings/ConnectionsSettings.tsx
 +++ b/apps/web/src/components/settings/ConnectionsSettings.tsx
-@@ -40,6 +40,7 @@ import { useAccessEnvironment } from "./useAccessEnvironment";
+@@ -45,6 +45,7 @@ import { useAccessEnvironment } from "./useAccessEnvironment";
  import { SettingsPageContainer, SettingsRow, SettingsSection } from "./settingsLayout";
  import { ManagedByOrganization } from "../ManagedPolicy";
  import { LocalEnvironmentSetting } from "./LocalEnvironmentSetting";
 +import { DeviceNameRow } from "./DeviceNameRow";
- import { searchableSetting } from "./settingsSearch";
+ import { useSearchableSetting } from "./settingsSearch";
  import { ConnectDeviceApprovalSettings } from "./ConnectDeviceApprovalSettings";
  import { EnvironmentIconMenu } from "./EnvironmentIconPicker";
-@@ -1272,6 +1273,7 @@ function ConnectionsSettingsContent({
+@@ -1368,6 +1369,7 @@ function ConnectionsSettingsContent({
                  <ManagedByOrganization policy={accessServerConfig.managedPolicy} />
                </div>
              ) : null}
@@ -162,10 +162,10 @@ index 0000000000000000000000000000000000000000..9e7800dd04b687153c6f3b1ef6c06f38
 +  Atom.withLabel("web-environment-label-overrides"),
 +);
 diff --git a/apps/web/src/hooks/useSettings.ts b/apps/web/src/hooks/useSettings.ts
-index d5565f6a4fcc38e641bea128ce15f5db38434648..12a5660f05426110aa7e7ebe5d0a3224121e0f7d 100644
+index 9cb27b4cc261114b79e7cc8453a3bdc9430b1bff..291b07da099dfe380b3fa1242d5992fa46fc1788 100644
 --- a/apps/web/src/hooks/useSettings.ts
 +++ b/apps/web/src/hooks/useSettings.ts
-@@ -50,6 +50,7 @@ import { AsyncResult, Atom } from "effect/reactivity";
+@@ -51,6 +51,7 @@ import { AsyncResult, Atom } from "effect/reactivity";
  import { toastManager } from "~/components/ui/toast";
  import { isHostedStaticApp } from "~/hostedPairing";
  import { environmentCatalog } from "~/connection/catalog";
@@ -173,7 +173,7 @@ index d5565f6a4fcc38e641bea128ce15f5db38434648..12a5660f05426110aa7e7ebe5d0a3224
  import { primaryServerSettingsAtom, serverEnvironment } from "~/state/server";
  import { useEnvironments, usePrimaryEnvironment } from "~/state/environments";
  import { useAtomCommand } from "~/state/use-atom-command";
-@@ -94,8 +95,16 @@ function getClientSettingsSnapshot(): ClientSettings {
+@@ -97,8 +98,16 @@ function getClientSettingsSnapshot(): ClientSettings {
    return clientSettingsSnapshot;
  }
  
@@ -190,7 +190,7 @@ index d5565f6a4fcc38e641bea128ce15f5db38434648..12a5660f05426110aa7e7ebe5d0a3224
    emitClientSettingsChange();
  }
  
-@@ -776,6 +785,7 @@ export function updateClientSettings(patch: ClientSettingsPatch): Promise<void>
+@@ -815,6 +824,7 @@ export function updateClientSettings(patch: ClientSettingsPatch): Promise<void>
  export function __resetClientSettingsPersistenceForTests(): void {
    clientSettingsHydrationGeneration += 1;
    clientSettingsSnapshot = DEFAULT_CLIENT_SETTINGS;
@@ -198,7 +198,7 @@ index d5565f6a4fcc38e641bea128ce15f5db38434648..12a5660f05426110aa7e7ebe5d0a3224
    clientSettingsHydrationStatus = "pending";
    clientSettingsHydrationPromise = null;
    clientSettingsPersistenceQueue = Promise.resolve();
-@@ -789,6 +799,7 @@ export function __resetClientSettingsPersistenceForTests(): void {
+@@ -828,6 +838,7 @@ export function __resetClientSettingsPersistenceForTests(): void {
  export function __setClientSettingsForTests(settings: ClientSettings): void {
    clientSettingsHydrationGeneration += 1;
    clientSettingsSnapshot = settings;
@@ -380,10 +380,10 @@ index 0000000000000000000000000000000000000000..00d6c64765f0f11a00513705aa6cd53c
 +  });
 +});
 diff --git a/packages/contracts/src/settings.ts b/packages/contracts/src/settings.ts
-index 8bb0ca4de7e8b88b1405a2a39b9c4d86c29b2348..864226dbcad9cdec958ad08cb6479cb4bf071715 100644
+index 3f2b1af0b50c44b008c86fe805f2a2756eb1fe78..a5b3c08e00456bcc55dae08284f3a51a311f3365 100644
 --- a/packages/contracts/src/settings.ts
 +++ b/packages/contracts/src/settings.ts
-@@ -550,6 +550,10 @@ export const ClientSettingsSchema = Schema.Struct({
+@@ -568,6 +568,10 @@ export const ClientSettingsSchema = Schema.Struct({
    sidebarHiddenEnvironmentIds: Schema.Array(TrimmedNonEmptyString).pipe(
      Schema.withDecodingDefault(Effect.succeed([])),
    ),
@@ -394,7 +394,7 @@ index 8bb0ca4de7e8b88b1405a2a39b9c4d86c29b2348..864226dbcad9cdec958ad08cb6479cb4
    sidebarProjectGroupingMode: SidebarProjectGroupingMode.pipe(
      Schema.withDecodingDefault(Effect.succeed(DEFAULT_SIDEBAR_PROJECT_GROUPING_MODE)),
    ),
-@@ -2099,6 +2103,9 @@ export const ClientSettingsPatch = Schema.Struct({
+@@ -2173,6 +2177,9 @@ export const ClientSettingsPatch = Schema.Struct({
    threadDetailsItems: Schema.optionalKey(Schema.Record(Schema.String, Schema.Boolean)),
    sidebarWorkingShelfEnabled: Schema.optionalKey(Schema.Boolean),
    sidebarHiddenEnvironmentIds: Schema.optionalKey(Schema.Array(TrimmedNonEmptyString)),

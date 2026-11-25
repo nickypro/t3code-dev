@@ -1,0 +1,223 @@
+diff --git a/apps/desktop/src/ipc/methods/window.test.ts b/apps/desktop/src/ipc/methods/window.test.ts
+index 02f60ef3358ac70f12fea5b5a79a8ef72154ecef..543b69dd91b67920d874c005d89eb92ef999eb5f 100644
+--- a/apps/desktop/src/ipc/methods/window.test.ts
++++ b/apps/desktop/src/ipc/methods/window.test.ts
+@@ -266,6 +266,7 @@ describe("toLocalBackendPath", () => {
+ });
+ 
+ describe("installRelayTelemetryEnabled", () => {
++  const optedIn = { T3CODE_TELEMETRY_ENABLED: "true" };
+   // The renderer reads this over sync IPC, so the answer must not wait on the filesystem.
+   const relayTelemetryEnabled = (
+     env: NodeJS.ProcessEnv,
+@@ -312,13 +313,20 @@ describe("installRelayTelemetryEnabled", () => {
+         beforeDiscovery: false,
+         afterDiscovery: false,
+       });
+-      // Undecided until the login shell is read, so the renderer asks again instead of opting out.
++      // Off unless asked for: with nothing set, the renderer is told no without waiting.
+       assert.deepEqual(yield* relayTelemetryEnabled({}), {
++        beforeDiscovery: false,
++        afterDiscovery: false,
++      });
++      // Undecided until the login shell is read, so the renderer asks again instead of opting out.
++      assert.deepEqual(yield* relayTelemetryEnabled({ ...optedIn }), {
+         beforeDiscovery: null,
+         afterDiscovery: true,
+       });
+       assert.deepEqual(
+-        yield* relayTelemetryEnabled({}, undefined, { T3CODE_TELEMETRY_ENABLED: "false" }),
++        yield* relayTelemetryEnabled({ ...optedIn }, undefined, {
++          T3CODE_TELEMETRY_ENABLED: "false",
++        }),
+         { beforeDiscovery: null, afterDiscovery: false },
+       );
+     }),
+@@ -334,11 +342,14 @@ describe("installRelayTelemetryEnabled", () => {
+       const after = function* (...args: Parameters<typeof relayTelemetryEnabled>) {
+         return (yield* relayTelemetryEnabled(...args)).afterDiscovery;
+       };
+-      assert.isFalse(yield* after({}, policy({ telemetry: false })));
+-      assert.isTrue(yield* after({}, policy({ webhookTasks: false })));
++      assert.isFalse(yield* after({ ...optedIn }, policy({ telemetry: false })));
++      assert.isTrue(yield* after({ ...optedIn }, policy({ webhookTasks: false })));
+       // A policy that cannot be read fails closed.
+       assert.isFalse(
+-        yield* after({}, new ManagedPolicyFileError({ path: "/test", reason: "bad JSON" })),
++        yield* after(
++          { ...optedIn },
++          new ManagedPolicyFileError({ path: "/test", reason: "bad JSON" }),
++        ),
+       );
+     }),
+   );
+diff --git a/apps/server/src/cloud/relayTracing.test.ts b/apps/server/src/cloud/relayTracing.test.ts
+index 3d75fd61f78974f79b2007faf9a5ce244e85a77c..6f2d8361d42d401eebaf820543c34c0a97f30b11 100644
+--- a/apps/server/src/cloud/relayTracing.test.ts
++++ b/apps/server/src/cloud/relayTracing.test.ts
+@@ -66,7 +66,8 @@ it.effect("relay tracing waits for the desktop shell's telemetry opt-out", () =>
+ });
+ 
+ it("reports the server's relay tracing policy to clients", () => {
+-  assert.isTrue(allowedFor({}, undefined));
++  assert.isFalse(allowedFor({}, undefined));
++  assert.isTrue(allowedFor({ T3CODE_TELEMETRY_ENABLED: "true" }, undefined));
+   assert.isFalse(allowedFor({ T3CODE_TELEMETRY_ENABLED: "false" }, undefined));
+   assert.isFalse(allowedFor({ CI: "true" }, undefined));
+   assert.isTrue(allowedFor({ CI: "true", T3CODE_TELEMETRY_ENABLED: "true" }, undefined));
+diff --git a/apps/server/src/telemetry/AnalyticsService.test.ts b/apps/server/src/telemetry/AnalyticsService.test.ts
+index 8fe1698f4770cc84c8d4abee8dc8784c22cf4177..4878c711b6329f378ecbe83c4ffd615aa32fadd3 100644
+--- a/apps/server/src/telemetry/AnalyticsService.test.ts
++++ b/apps/server/src/telemetry/AnalyticsService.test.ts
+@@ -335,6 +335,45 @@ it.layer(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))("AnalyticsService
+     }),
+   );
+ 
++  it.effect("sends nothing unless the environment opts in", () =>
++    Effect.gen(function* () {
++      const offCi = (telemetryEnv: Parameters<typeof analyticsLayerWith>[2]) =>
++        sendFor(1, respondWithStatus(204), recordTwentyEvents, undefined, telemetryEnv).pipe(
++          Effect.provideService(HostProcess.Environment, {}),
++        );
++      assert.deepEqual(yield* offCi({}), []);
++      assert.deepEqual(yield* offCi({ T3CODE_TELEMETRY_ENABLED: false }), []);
++      assert.equal((yield* offCi({ T3CODE_TELEMETRY_ENABLED: true })).length, 1);
++    }),
++  );
++
++  it.effect("a desktop login shell can opt in after the server has started", () =>
++    Effect.gen(function* () {
++      const env: NodeJS.ProcessEnv = { T3CODE_DESKTOP_SHELL_DISCOVERY_PENDING: "1" };
++      const batches = yield* sendFor(
++        0,
++        respondWithStatus(204),
++        Effect.gen(function* () {
++          const analytics = yield* AnalyticsService.AnalyticsService;
++          yield* analytics.record("test.before-discovery");
++          yield* analytics.flush;
++          delete env.T3CODE_DESKTOP_SHELL_DISCOVERY_PENDING;
++          yield* analytics.record("test.no-preference");
++          yield* analytics.flush;
++          env.T3CODE_TELEMETRY_ENABLED = "true";
++          yield* analytics.record("test.opted-in");
++          yield* analytics.flush;
++        }),
++        undefined,
++        {},
++      ).pipe(Effect.provideService(HostProcess.Environment, env));
++      assert.deepEqual(
++        batches.flat().map((event) => event.event),
++        ["test.opted-in"],
++      );
++    }),
++  );
++
+   it.effect("drops a batch the endpoint rejects without sending it again", () =>
+     Effect.gen(function* () {
+       const batches = yield* sendFor(10, respondWithStatus(400));
+diff --git a/apps/server/src/telemetry/AnalyticsService.ts b/apps/server/src/telemetry/AnalyticsService.ts
+index 3d92a317fd2ed4d348ab2d20291f59d5ef83003a..82d56f29ff7d69fb5b31be8b44dc985ffc3137eb 100644
+--- a/apps/server/src/telemetry/AnalyticsService.ts
++++ b/apps/server/src/telemetry/AnalyticsService.ts
+@@ -1,6 +1,6 @@
+ // T3 ingest retains events and forwards to PostHog; UUIDs deduplicate retries there.
+ import * as HostProcess from "@t3tools/shared/HostProcess";
+-import { isCiEnvironment, isDoNotTrackSet } from "@t3tools/shared/otelEnvironment";
++import { isDoNotTrackSet, isTelemetryOnByDefault } from "@t3tools/shared/otelEnvironment";
+ import type { ClientOs } from "@t3tools/contracts";
+ import * as Clock from "effect/Clock";
+ import * as Config from "effect/Config";
+@@ -127,8 +127,12 @@ export const make = Effect.gen(function* () {
+   const telemetryConfig = yield* TelemetryEnvConfig;
+   const hostEnvironment = yield* HostProcess.Environment;
+   const awaitingShellConsent = hostEnvironment.T3CODE_DESKTOP_SHELL_DISCOVERY_PENDING === "1";
+-  const enabledByDefault = !isCiEnvironment(hostEnvironment);
+-  const enabledAtStartup = Option.getOrElse(telemetryConfig.enabled, () => enabledByDefault);
++  const enabledByDefault = isTelemetryOnByDefault(hostEnvironment);
++  // An unset preference stays open while the desktop reads the login shell, which may opt in.
++  const enabledAtStartup = Option.getOrElse(
++    telemetryConfig.enabled,
++    () => enabledByDefault || awaitingShellConsent,
++  );
+   // A managed policy can switch analytics off over the environment, never on.
+   const policyAllows =
+     ManagedPolicy.deniedBy(yield* ManagedPolicy.ManagedPolicy, "telemetry") === undefined;
+diff --git a/packages/shared/src/otelEnvironment.test.ts b/packages/shared/src/otelEnvironment.test.ts
+index 746beabff76097e9c3c8fdf7eef3c3baa7fbdff9..ef64430c327ee82d756c99efd90fabac55ef3c79 100644
+--- a/packages/shared/src/otelEnvironment.test.ts
++++ b/packages/shared/src/otelEnvironment.test.ts
+@@ -400,6 +400,8 @@ describe("isCiEnvironment", () => {
+ });
+ 
+ describe("isRelayTracingEnabled", () => {
++  const optedIn = { T3CODE_TELEMETRY_ENABLED: "true" };
++
+   it("turns off for DO_NOT_TRACK, even when T3 telemetry is on", () => {
+     assert.isFalse(OtelEnvironment.isRelayTracingEnabled({ DO_NOT_TRACK: "1" }));
+     assert.isFalse(
+@@ -408,21 +410,32 @@ describe("isRelayTracingEnabled", () => {
+         T3CODE_TELEMETRY_ENABLED: "1",
+       }),
+     );
+-    assert.isTrue(OtelEnvironment.isRelayTracingEnabled({ DO_NOT_TRACK: "0" }));
+-    assert.isTrue(OtelEnvironment.isRelayTracingEnabled({ DO_NOT_TRACK: "" }));
++    assert.isTrue(OtelEnvironment.isRelayTracingEnabled({ ...optedIn, DO_NOT_TRACK: "0" }));
++    assert.isTrue(OtelEnvironment.isRelayTracingEnabled({ ...optedIn, DO_NOT_TRACK: "" }));
++  });
++
++  it("stays off until T3CODE_TELEMETRY_ENABLED asks for it", () => {
++    assert.isFalse(OtelEnvironment.isTelemetryOnByDefault({}));
++    assert.isFalse(OtelEnvironment.isRelayTracingEnabled({}));
++    assert.isFalse(OtelEnvironment.isRelayTracingEnabled({ DO_NOT_TRACK: "0" }));
++    assert.isFalse(OtelEnvironment.isRelayTracingEnabled({ T3CODE_OTEL_SDK_DISABLED: "false" }));
++    assert.isTrue(OtelEnvironment.isRelayTracingEnabled(optedIn));
+   });
+ 
+-  it("defaults on and respects the T3CODE SDK override of the standard kill switch", () => {
+-    assert.isTrue(OtelEnvironment.isRelayTracingEnabled({}));
+-    assert.isFalse(OtelEnvironment.isRelayTracingEnabled({ OTEL_SDK_DISABLED: "true" }));
++  it("respects the T3CODE SDK override of the standard kill switch", () => {
++    assert.isFalse(
++      OtelEnvironment.isRelayTracingEnabled({ ...optedIn, OTEL_SDK_DISABLED: "true" }),
++    );
+     assert.isTrue(
+       OtelEnvironment.isRelayTracingEnabled({
++        ...optedIn,
+         OTEL_SDK_DISABLED: "true",
+         T3CODE_OTEL_SDK_DISABLED: "false",
+       }),
+     );
+     assert.isFalse(
+       OtelEnvironment.isRelayTracingEnabled({
++        ...optedIn,
+         OTEL_SDK_DISABLED: "false",
+         T3CODE_OTEL_SDK_DISABLED: "true",
+       }),
+diff --git a/packages/shared/src/otelEnvironment.ts b/packages/shared/src/otelEnvironment.ts
+index 29267c634414deb32c9ab442b347104e8593530f..44375a494d070d658b41db47fcdb69d956cac1fb 100644
+--- a/packages/shared/src/otelEnvironment.ts
++++ b/packages/shared/src/otelEnvironment.ts
+@@ -342,6 +342,14 @@ export const isCiEnvironment = (env: Readonly<Record<string, string | undefined>
+     return value !== undefined && value !== "" && value !== "false" && value !== "0";
+   });
+ 
++// Catgirl Code is a fork: analytics and relay traces go to upstream's accounts, so both stay off
++// until `T3CODE_TELEMETRY_ENABLED=true` asks for them. Set this to true for upstream's default.
++const TELEMETRY_ON_BY_DEFAULT: boolean = false;
++
++/** Whether product analytics and relay tracing are on when `T3CODE_TELEMETRY_ENABLED` is unset. */
++export const isTelemetryOnByDefault = (env: Readonly<Record<string, string | undefined>>) =>
++  TELEMETRY_ON_BY_DEFAULT && !isCiEnvironment(env);
++
+ /** The cross-tool `DO_NOT_TRACK=1` convention turns off product analytics and relay tracing. */
+ export const isDoNotTrackSet = (env: Readonly<Record<string, string | undefined>>) =>
+   T3CODE_TRUE.includes(env.DO_NOT_TRACK?.trim().toLowerCase() ?? "");
+@@ -353,7 +361,7 @@ export const isRelayTracingEnabled = (env: Readonly<Record<string, string | unde
+   }).pipe(
+     Effect.map(
+       ({ telemetry, t3, spec }) =>
+-        (telemetry.value ?? !isCiEnvironment(env)) &&
++        (telemetry.value ?? isTelemetryOnByDefault(env)) &&
+         !isDoNotTrackSet(env) &&
+         !(t3.value ?? spec.value ?? false),
+     ),

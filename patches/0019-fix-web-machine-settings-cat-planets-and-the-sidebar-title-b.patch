@@ -1,0 +1,151 @@
+diff --git a/apps/web/src/components/settings/ConnectionsSettings.tsx b/apps/web/src/components/settings/ConnectionsSettings.tsx
+index 037acbe246a85e43e03cb061682bf9c7972ef168..928a72a4706071c771d79976751e0e33ff376c95 100644
+--- a/apps/web/src/components/settings/ConnectionsSettings.tsx
++++ b/apps/web/src/components/settings/ConnectionsSettings.tsx
+@@ -46,6 +46,7 @@ import { SettingsPageContainer, SettingsRow, SettingsSection } from "./settingsL
+ import { ManagedByOrganization } from "../ManagedPolicy";
+ import { LocalEnvironmentSetting } from "./LocalEnvironmentSetting";
+ import { DeviceNameRow } from "./DeviceNameRow";
++import { SidebarVisibilityRow } from "./SidebarVisibilityRow";
+ import { useSearchableSetting } from "./settingsSearch";
+ import { ConnectDeviceApprovalSettings } from "./ConnectDeviceApprovalSettings";
+ import { EnvironmentIconMenu } from "./EnvironmentIconPicker";
+@@ -118,11 +119,7 @@ import {
+   usePrimaryEnvironment,
+ } from "~/state/environments";
+ import { requestConfirmDialog } from "~/confirmDialog";
+-import {
+-  updateClientSettings,
+-  useClientSettings,
+-  useUpdateEnvironmentSettings,
+-} from "~/hooks/useSettings";
++import { useUpdateEnvironmentSettings } from "~/hooks/useSettings";
+ import { useAtomCommand } from "../../state/use-atom-command";
+ import { environmentIdsKey } from "~/state/environmentAtomList";
+ import { environmentUpdateStatesAtom, serverEnvironment } from "~/state/server";
+@@ -171,31 +168,6 @@ const BACKEND_VALUE_DEFAULT_WSL = "backend:default-wsl";
+ const BACKEND_VALUE_WSL_OFF = "backend:wsl-off";
+ 
+ // Subscribes on its own so desktop download progress does not re-render the page.
+-/** Per device: whether this machine's threads are listed in the sidebar. */
+-function SidebarVisibilityRow({ environmentId }: { readonly environmentId: EnvironmentId }) {
+-  const hiddenEnvironmentIds = useClientSettings((s) => s.sidebarHiddenEnvironmentIds);
+-  const shown = !hiddenEnvironmentIds.includes(environmentId);
+-  return (
+-    <SettingsRow
+-      title="Show threads in sidebar"
+-      description="Off keeps this machine's threads out of the sidebar on this device. Search, links and open threads still reach them."
+-      control={
+-        <Switch
+-          checked={shown}
+-          aria-label="Show this machine's threads in the sidebar"
+-          onCheckedChange={(checked) =>
+-            void updateClientSettings({
+-              sidebarHiddenEnvironmentIds: checked
+-                ? hiddenEnvironmentIds.filter((id) => id !== environmentId)
+-                : [...hiddenEnvironmentIds, environmentId],
+-            })
+-          }
+-        />
+-      }
+-    />
+-  );
+-}
+-
+ function LocalVersionStatusLabel() {
+   const m = useMessages();
+   const updateState = useDesktopUpdateState();
+diff --git a/apps/web/src/components/settings/DeviceNameRow.tsx b/apps/web/src/components/settings/DeviceNameRow.tsx
+index 0908ba0def3109a17020ae89208340b149737e04..d3fe42b7597fb205721b95ff7a35a534f2448718 100644
+--- a/apps/web/src/components/settings/DeviceNameRow.tsx
++++ b/apps/web/src/components/settings/DeviceNameRow.tsx
+@@ -1,3 +1,4 @@
++/* oxlint-disable t3code/no-untranslated-copy -- Catgirl Code setting, English only: upstream's catalogs stay untouched */
+ import { useAtomValue } from "@effect/atom-react";
+ import type { EnvironmentId } from "@t3tools/contracts";
+ 
+diff --git a/apps/web/src/components/settings/SidebarVisibilityRow.tsx b/apps/web/src/components/settings/SidebarVisibilityRow.tsx
+new file mode 100644
+index 0000000000000000000000000000000000000000..ee50096879b5701dccd141cf27811546de1600c3
+--- /dev/null
++++ b/apps/web/src/components/settings/SidebarVisibilityRow.tsx
+@@ -0,0 +1,31 @@
++/* oxlint-disable t3code/no-untranslated-copy -- Catgirl Code setting, English only: upstream's catalogs stay untouched */
++import type { EnvironmentId } from "@t3tools/contracts";
++
++import { updateClientSettings, useClientSettings } from "~/hooks/useSettings";
++import { Switch } from "../ui/switch";
++import { SettingsRow } from "./settingsLayout";
++
++/** Per device: whether this machine's threads are listed in the sidebar. */
++export function SidebarVisibilityRow({ environmentId }: { readonly environmentId: EnvironmentId }) {
++  const hiddenEnvironmentIds = useClientSettings((s) => s.sidebarHiddenEnvironmentIds);
++  const shown = !hiddenEnvironmentIds.includes(environmentId);
++  return (
++    <SettingsRow
++      title="Show threads in sidebar"
++      description="Off keeps this machine's threads out of the sidebar on this device. Search, links and open threads still reach them."
++      control={
++        <Switch
++          checked={shown}
++          aria-label="Show this machine's threads in the sidebar"
++          onCheckedChange={(checked) =>
++            void updateClientSettings({
++              sidebarHiddenEnvironmentIds: checked
++                ? hiddenEnvironmentIds.filter((id) => id !== environmentId)
++                : [...hiddenEnvironmentIds, environmentId],
++            })
++          }
++        />
++      }
++    />
++  );
++}
+diff --git a/apps/web/src/components/sidebar/SidebarCatFleet.logic.test.ts b/apps/web/src/components/sidebar/SidebarCatFleet.logic.test.ts
+index 352baa0f68c7a311d2dba5c794d8c0fd839e3663..18909a620c9e0fe1d195da9de38e7e45b16b4184 100644
+--- a/apps/web/src/components/sidebar/SidebarCatFleet.logic.test.ts
++++ b/apps/web/src/components/sidebar/SidebarCatFleet.logic.test.ts
+@@ -63,7 +63,9 @@ describe("summarizeCatFleet", () => {
+         environmentId: "box",
+         label: "Box",
+         offline: true,
+-        bodies: [{ key: "settled-running", title: "Thread settled-running", running: true, subagents: 0 }],
++        bodies: [
++          { key: "settled-running", title: "Thread settled-running", running: true, subagents: 0 },
++        ],
+       },
+     ]);
+   });
+diff --git a/apps/web/src/components/sidebar/SidebarCatFleet.tsx b/apps/web/src/components/sidebar/SidebarCatFleet.tsx
+index 5b40adc225baa12e614f89ce8e00fc0f92bee37b..7127ea12ae992bfaecc2181b44458f17635a2cdb 100644
+--- a/apps/web/src/components/sidebar/SidebarCatFleet.tsx
++++ b/apps/web/src/components/sidebar/SidebarCatFleet.tsx
+@@ -1,3 +1,4 @@
++/* oxlint-disable t3code/no-untranslated-copy -- Catgirl Code feature, English only: upstream's catalogs stay untouched */
+ import type { CSSProperties } from "react";
+ import { memo, useId } from "react";
+ 
+diff --git a/apps/web/src/components/sidebar/SidebarChrome.tsx b/apps/web/src/components/sidebar/SidebarChrome.tsx
+index af2daa174857c97fab99fa1c62f05fe313a37d49..509ceb2cb456245f3c6ea9e10e2d461dbc897450 100644
+--- a/apps/web/src/components/sidebar/SidebarChrome.tsx
++++ b/apps/web/src/components/sidebar/SidebarChrome.tsx
+@@ -187,7 +187,8 @@ function SidebarBrandMark({ onBackdrop }: { onBackdrop: boolean }) {
+   return (
+     <span className="inline-flex min-w-0 items-baseline gap-1 text-sm tracking-tight">
+       <span className="shrink-0 font-bold [text-box:trim-both_cap_alphabetic] supports-[text-box:trim-both_cap_alphabetic]:py-1">
+-        Cat
++        {/* oxlint-disable-next-line t3code/no-untranslated-copy -- product wordmark */}
++        {"Cat"}
+       </span>
+       <span
+         className={cn(
+@@ -195,7 +196,8 @@ function SidebarBrandMark({ onBackdrop }: { onBackdrop: boolean }) {
+           onBackdrop ? "text-white/70" : "text-muted-foreground",
+         )}
+       >
+-        Code
++        {/* oxlint-disable-next-line t3code/no-untranslated-copy -- product wordmark */}
++        {"Code"}
+       </span>
+     </span>
+   );

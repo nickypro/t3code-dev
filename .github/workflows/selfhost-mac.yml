@@ -27,12 +27,12 @@ jobs:
         run: mv selfhost "$RUNNER_TEMP/selfhost" && ls "$RUNNER_TEMP/selfhost/patches"
 
       # Manual checkout: upstream has orphaned gitlinks under .repos that break actions/checkout.
-      - name: Checkout pingdotgg/t3code@v0.1.10
+      - name: Checkout pingdotgg/t3code@v0.1.12
         run: |
           set -euo pipefail
           git init .
           git remote add origin https://github.com/pingdotgg/t3code.git
-          git fetch --no-tags --depth=1 origin refs/tags/v0.1.10
+          git fetch --no-tags --depth=1 origin refs/tags/v0.1.12
           git sparse-checkout set --no-cone '/*' '!/.repos/'
           git checkout --detach FETCH_HEAD
           git log --oneline -1
@@ -63,10 +63,10 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
-      # The tag still carries 0.1.5 in package.json; upstream's release stamps
+      # The tag carries an older version in package.json; upstream's release stamps
       # the release version in before building, so do the same.
-      - name: Stamp version 0.1.10
-        run: node scripts/update-release-package-versions.ts 0.1.10 && git status --short
+      - name: Stamp version 0.1.12
+        run: node scripts/update-release-package-versions.ts 0.1.12 && git status --short
 
       - name: Build unsigned arm64 dmg
         env:
@@ -93,7 +93,15 @@ jobs:
           ls -la release
           grep -rl "relay.slop.ie" apps/desktop/dist-electron apps/server/dist > /tmp/hits; head -5 /tmp/hits
           grep -rl "T3CODE_TLS_CLIENT_CERT" apps/server/dist | head -2 | grep -q . || { echo "::error::client-certificate patch missing from server bundle"; exit 1; }
-          ls release/*0.1.10*.dmg
+          ls release/*0.1.12*.dmg
+          # The interface says Catgirl, not T3 (source maps keep the original text).
+          for name in "T3 Code" "T3 Connect"; do
+            hits=$(grep -rl --exclude='*.map' "$name" apps/server/dist/client/assets | wc -l | tr -d ' ')
+            echo "$name: $hits files"
+            [ "$hits" = "0" ] || { echo "::error::$name still appears in the web client"; exit 1; }
+          done
+          # Usage reports to upstream are off unless asked for.
+          grep -rq "TELEMETRY_ON_BY_DEFAULT = false" apps/server/dist || echo "::warning::could not confirm telemetry is off by default in the server bundle"
           if find release -name app-update.yml | grep -q .; then
             echo "::error::app-update.yml present, auto-update would be enabled"; find release -name app-update.yml -exec cat {} \;; exit 1
           fi

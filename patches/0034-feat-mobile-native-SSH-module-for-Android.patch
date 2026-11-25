@@ -1,0 +1,1645 @@
+diff --git a/apps/mobile/modules/t3-ssh/android/build.gradle b/apps/mobile/modules/t3-ssh/android/build.gradle
+new file mode 100644
+index 0000000000000000000000000000000000000000..d2fad56789c941db2bbbdd259255d955348a0167
+--- /dev/null
++++ b/apps/mobile/modules/t3-ssh/android/build.gradle
+@@ -0,0 +1,45 @@
++apply plugin: 'com.android.library'
++apply plugin: 'org.jetbrains.kotlin.android'
++
++group = 'com.t3tools.ssh'
++version = '0.0.0'
++
++android {
++  namespace 'expo.modules.t3ssh'
++  compileSdk rootProject.ext.compileSdkVersion
++  defaultConfig {
++    minSdkVersion rootProject.ext.minSdkVersion
++    targetSdkVersion rootProject.ext.targetSdkVersion
++    consumerProguardFiles 'proguard-rules.pro'
++  }
++  packaging {
++    resources {
++      // BouncyCastle's multi-release jars each carry the same OSGi manifest.
++      excludes += ['META-INF/versions/9/OSGI-INF/MANIFEST.MF']
++    }
++  }
++}
++
++dependencies {
++  implementation project(':expo-modules-core')
++  // sshj with the BouncyCastle versions Amaze File Manager ships alongside it.
++  implementation 'com.hierynomus:sshj:0.40.0'
++  implementation 'org.bouncycastle:bcprov-jdk18on:1.85.2'
++  implementation 'org.bouncycastle:bcpkix-jdk18on:1.85'
++  testImplementation 'junit:junit:4.13.2'
++}
++
++tasks.withType(Test).configureEach {
++  javaLauncher = javaToolchains.launcherFor {
++    languageVersion = JavaLanguageVersion.of(21)
++  }
++  // The end-to-end test runs only when given the scripts and archive to use.
++  ['T3_SSH_E2E_SCRIPTS', 'T3_SSH_E2E_HOME'].each { name ->
++    def value = System.getenv(name)
++    if (value != null) environment name, value
++  }
++  testLogging {
++    events 'passed', 'skipped', 'failed'
++    exceptionFormat 'full'
++  }
++}
+diff --git a/apps/mobile/modules/t3-ssh/android/proguard-rules.pro b/apps/mobile/modules/t3-ssh/android/proguard-rules.pro
+new file mode 100644
+index 0000000000000000000000000000000000000000..06cde41b36aa35c2be468e9b9cf0521c434d88e5
+--- /dev/null
++++ b/apps/mobile/modules/t3-ssh/android/proguard-rules.pro
+@@ -0,0 +1,11 @@
++# BouncyCastle registers its algorithms by class name, and sshj looks its
++# factories up through it, so R8 cannot see they are used.
++-keep class org.bouncycastle.** { *; }
++-keep class net.schmizz.** { *; }
++-keep class com.hierynomus.** { *; }
++# Optional sshj and BouncyCastle features that are absent on Android.
++-dontwarn org.ietf.jgss.**
++-dontwarn javax.naming.**
++-dontwarn javax.security.auth.login.**
++-dontwarn com.jcraft.jzlib.**
++-dontwarn org.slf4j.impl.**
+diff --git a/apps/mobile/modules/t3-ssh/android/src/main/AndroidManifest.xml b/apps/mobile/modules/t3-ssh/android/src/main/AndroidManifest.xml
+new file mode 100644
+index 0000000000000000000000000000000000000000..94cbbcfc396aca20240417158bac4d52ba4e1a14
+--- /dev/null
++++ b/apps/mobile/modules/t3-ssh/android/src/main/AndroidManifest.xml
+@@ -0,0 +1 @@
++<manifest xmlns:android="http://schemas.android.com/apk/res/android" />
+diff --git a/apps/mobile/modules/t3-ssh/android/src/main/java/expo/modules/t3ssh/KnownHosts.kt b/apps/mobile/modules/t3-ssh/android/src/main/java/expo/modules/t3ssh/KnownHosts.kt
+new file mode 100644
+index 0000000000000000000000000000000000000000..62928912daf93a5b89c47c5b8c451e5804341976
+--- /dev/null
++++ b/apps/mobile/modules/t3-ssh/android/src/main/java/expo/modules/t3ssh/KnownHosts.kt
+@@ -0,0 +1,42 @@
++package expo.modules.t3ssh
++
++import java.util.Base64
++
++/** One plain `known_hosts` entry: `name[,name...] keytype base64`. */
++data class KnownHost(val names: List<String>, val keyType: String, val keyBase64: String) {
++  val line: String get() = "${names.joinToString(",")} $keyType $keyBase64"
++
++  fun matches(name: String): Boolean = name in names
++}
++
++/**
++ * The subset of OpenSSH's known_hosts this app writes and reads: plain names, one key per
++ * line. Hashed names and `@cert-authority`/`@revoked` markers are skipped, so they can never
++ * make a host trusted.
++ */
++object KnownHosts {
++  /** The name OpenSSH files a host under: `host` on port 22, otherwise `[host]:port`. */
++  fun name(host: String, port: Int): String = if (port == 22) host else "[$host]:$port"
++
++  fun parse(text: String): List<KnownHost> = text.lineSequence().mapNotNull(::parseLine).toList()
++
++  fun parseLine(raw: String): KnownHost? {
++    val line = raw.trim()
++    if (line.isEmpty() || line.startsWith("#") || line.startsWith("@") || line.startsWith("|")) {
++      return null
++    }
++    val fields = line.split(Regex("\\s+"))
++    if (fields.size < 3) return null
++    val names = fields[0].split(",").filter { it.isNotEmpty() }
++    if (names.isEmpty() || names.any { it.startsWith("|") || it.contains('*') || it.contains('?') }) {
++      return null
++    }
++    val blob = try {
++      Base64.getDecoder().decode(fields[2])
++    } catch (_: IllegalArgumentException) {
++      return null
++    }
++    if (blob.isEmpty()) return null
++    return KnownHost(names, fields[1], fields[2])
++  }
++}
+diff --git a/apps/mobile/modules/t3-ssh/android/src/main/java/expo/modules/t3ssh/SshKeys.kt b/apps/mobile/modules/t3-ssh/android/src/main/java/expo/modules/t3ssh/SshKeys.kt
+new file mode 100644
+index 0000000000000000000000000000000000000000..6f8a9dcdd24ee50ff88828512aab0b3b80e62f00
+--- /dev/null
++++ b/apps/mobile/modules/t3-ssh/android/src/main/java/expo/modules/t3ssh/SshKeys.kt
+@@ -0,0 +1,96 @@
++package expo.modules.t3ssh
++
++import org.bouncycastle.crypto.params.Ed25519PrivateKeyParameters
++import org.bouncycastle.jce.provider.BouncyCastleProvider
++import java.io.ByteArrayOutputStream
++import java.io.DataOutputStream
++import java.security.KeyFactory
++import java.security.KeyPair
++import java.security.MessageDigest
++import java.security.SecureRandom
++import java.security.Security
++import java.security.spec.PKCS8EncodedKeySpec
++import java.security.spec.X509EncodedKeySpec
++import java.util.Base64
++
++/**
++ * sshj needs the full BouncyCastle provider. Android ships a cut-down one under
++ * the same name, so it is replaced; appending it leaves TLS and every other
++ * provider the platform prefers in place.
++ */
++object SshCrypto {
++  @Synchronized
++  fun ensureBouncyCastle() {
++    if (Security.getProvider(BouncyCastleProvider.PROVIDER_NAME) is BouncyCastleProvider) return
++    Security.removeProvider(BouncyCastleProvider.PROVIDER_NAME)
++    Security.addProvider(BouncyCastleProvider())
++  }
++}
++
++/** An ed25519 key kept as its 32-byte seed; the public key and signer derive from it. */
++class Ed25519Key(seed: ByteArray) {
++  private val seed = seed.copyOf()
++
++  init {
++    require(seed.size == SEED_BYTES) { "An ed25519 seed is $SEED_BYTES bytes." }
++  }
++
++  val publicKey: ByteArray = Ed25519PrivateKeyParameters(seed, 0).generatePublicKey().encoded
++
++  /** The SSH wire encoding of the public key, as in `authorized_keys`. */
++  val publicKeyBlob: ByteArray = sshStrings(KEY_TYPE.toByteArray(), publicKey)
++
++  fun seedCopy(): ByteArray = seed.copyOf()
++
++  fun publicKeyLine(comment: String): String {
++    val base = "$KEY_TYPE ${Base64.getEncoder().encodeToString(publicKeyBlob)}"
++    val trimmed = comment.trim()
++    return if (trimmed.isEmpty()) base else "$base $trimmed"
++  }
++
++  fun fingerprint(): String = sshFingerprint(publicKeyBlob)
++
++  /** A JCA key pair from BouncyCastle, which sshj signs with. */
++  fun toKeyPair(): KeyPair {
++    SshCrypto.ensureBouncyCastle()
++    val factory = KeyFactory.getInstance("Ed25519", BouncyCastleProvider.PROVIDER_NAME)
++    return KeyPair(
++      factory.generatePublic(X509EncodedKeySpec(X509_PREFIX + publicKey)),
++      factory.generatePrivate(PKCS8EncodedKeySpec(PKCS8_PREFIX + seed)),
++    )
++  }
++
++  companion object {
++    const val KEY_TYPE = "ssh-ed25519"
++    const val SEED_BYTES = 32
++
++    fun generate(random: SecureRandom = SecureRandom()): Ed25519Key {
++      val seed = ByteArray(SEED_BYTES)
++      random.nextBytes(seed)
++      return Ed25519Key(seed)
++    }
++
++    // RFC 8410 DER headers for a bare ed25519 private seed and public key.
++    private val PKCS8_PREFIX = hex("302e020100300506032b657004220420")
++    private val X509_PREFIX = hex("302a300506032b6570032100")
++  }
++}
++
++/** OpenSSH's `SHA256:` fingerprint of a public key blob. */
++fun sshFingerprint(blob: ByteArray): String =
++  "SHA256:" + Base64.getEncoder().withoutPadding().encodeToString(MessageDigest.getInstance("SHA-256").digest(blob))
++
++private fun sshStrings(vararg values: ByteArray): ByteArray {
++  val bytes = ByteArrayOutputStream()
++  DataOutputStream(bytes).use { out ->
++    for (value in values) {
++      out.writeInt(value.size)
++      out.write(value)
++    }
++  }
++  return bytes.toByteArray()
++}
++
++private fun hex(value: String): ByteArray = ByteArray(value.length / 2) { i ->
++  value.substring(i * 2, i * 2 + 2).toInt(16).toByte()
++}
+diff --git a/apps/mobile/modules/t3-ssh/android/src/main/java/expo/modules/t3ssh/SshSession.kt b/apps/mobile/modules/t3-ssh/android/src/main/java/expo/modules/t3ssh/SshSession.kt
+new file mode 100644
+index 0000000000000000000000000000000000000000..7986b062de6ea4f4232fbfe77e7c5a93ad00bd2f
+--- /dev/null
++++ b/apps/mobile/modules/t3-ssh/android/src/main/java/expo/modules/t3ssh/SshSession.kt
+@@ -0,0 +1,297 @@
++package expo.modules.t3ssh
++
++import net.schmizz.keepalive.KeepAliveProvider
++import net.schmizz.keepalive.KeepAliveRunner
++import net.schmizz.sshj.DefaultConfig
++import net.schmizz.sshj.SSHClient
++import net.schmizz.sshj.common.Buffer
++import net.schmizz.sshj.common.KeyType
++import net.schmizz.sshj.connection.channel.direct.Parameters
++import net.schmizz.sshj.transport.DisconnectListener
++import net.schmizz.sshj.transport.verification.HostKeyVerifier
++import net.schmizz.sshj.userauth.keyprovider.KeyPairWrapper
++import java.io.ByteArrayOutputStream
++import java.io.Closeable
++import java.io.IOException
++import java.io.InputStream
++import java.net.InetAddress
++import java.net.ServerSocket
++import java.security.KeyPair
++import java.security.PublicKey
++import java.util.Base64
++import java.util.concurrent.CopyOnWriteArrayList
++import java.util.concurrent.TimeUnit
++import kotlin.concurrent.thread
++
++/** One SSH server on the way to the target. The last hop is the target. */
++data class SshHop(
++  val host: String,
++  val port: Int,
++  val user: String,
++  val hostKeyAlias: String? = null,
++) {
++  /** The known_hosts name this hop's key is checked under. */
++  val knownHostsName: String
++    get() = hostKeyAlias?.takeIf { it.isNotBlank() } ?: KnownHosts.name(host, port)
++}
++
++data class SshOptions(
++  val connectTimeoutMs: Int = 15_000,
++  // Matches the desktop's ServerAliveInterval=15 / ServerAliveCountMax=3.
++  val keepAliveSeconds: Int = 15,
++  val keepAliveMaxCount: Int = 3,
++)
++
++data class ExecResult(val exitCode: Int?, val stdout: String, val stderr: String)
++
++/** A host presented a key that known_hosts does not list under its name. */
++data class HostKeyRejection(
++  val hop: SshHop,
++  val keyType: String,
++  val keyBase64: String,
++  val fingerprint: String,
++  /** known_hosts already holds a different key under this name. */
++  val changed: Boolean,
++) {
++  val knownHostsLine: String get() = "${hop.knownHostsName} $keyType $keyBase64"
++}
++
++sealed interface SshConnectResult {
++  data class Connected(val session: SshSession) : SshConnectResult
++
++  data class Rejected(val rejection: HostKeyRejection) : SshConnectResult
++}
++
++/**
++ * An authenticated connection to the last of a chain of hops. When any hop's transport dies,
++ * the session stops accepting forwarded connections at once, so clients fail fast and
++ * reconnect instead of hanging on a dead tunnel.
++ */
++class SshSession private constructor(private val clients: List<SSHClient>) : Closeable {
++  private val listeners = CopyOnWriteArrayList<ServerSocket>()
++
++  @Volatile private var closed = false
++
++  private val target: SSHClient get() = clients.last()
++
++  val isOpen: Boolean get() = !closed && clients.all { it.isConnected && it.isAuthenticated }
++
++  /** Runs `command` on the target with `stdin` as its input, then waits for it to exit. */
++  fun exec(command: String, stdin: String, timeoutMs: Long): ExecResult {
++    target.startSession().use { session ->
++      val cmd = session.exec(command)
++      val stdout = Drain(cmd.inputStream)
++      val stderr = Drain(cmd.errorStream)
++      try {
++        cmd.outputStream.use { it.write(stdin.toByteArray(Charsets.UTF_8)) }
++      } catch (_: IOException) {
++        // The command exited without reading all of its input; its status says why.
++      }
++      cmd.join(timeoutMs, TimeUnit.MILLISECONDS)
++      return ExecResult(cmd.exitStatus, stdout.await(), stderr.await())
++    }
++  }
++
++  /** Forwards a new loopback port on this device to `127.0.0.1:remotePort` on the target. */
++  fun forward(remotePort: Int): Int {
++    val server = ServerSocket(0, BACKLOG, InetAddress.getLoopbackAddress())
++    listeners += server
++    if (!isOpen) {
++      closeQuietly(server)
++      throw IOException("The SSH session is closed.")
++    }
++    val forwarder = target.newLocalPortForwarder(
++      Parameters(LOOPBACK, server.localPort, LOOPBACK, remotePort),
++      server,
++    )
++    thread(isDaemon = true, name = "t3-ssh-forward-${server.localPort}") {
++      try {
++        forwarder.listen()
++      } catch (_: IOException) {
++        // The listener was closed.
++      } finally {
++        closeQuietly(server)
++        listeners -= server
++      }
++    }
++    return server.localPort
++  }
++
++  override fun close() {
++    stopListening()
++    for (client in clients.asReversed()) {
++      try {
++        client.disconnect()
++      } catch (_: IOException) {
++        // Already gone.
++      }
++    }
++  }
++
++  // Runs on the dying transport's own thread, so it only flips state there.
++  private fun onTransportDeath() {
++    if (closed) return
++    stopListening()
++    thread(isDaemon = true, name = "t3-ssh-teardown") { close() }
++  }
++
++  private fun stopListening() {
++    closed = true
++    for (server in listeners) closeQuietly(server)
++    listeners.clear()
++  }
++
++  companion object {
++    private const val LOOPBACK = "127.0.0.1"
++    private const val BACKLOG = 50
++
++    fun connect(
++      hops: List<SshHop>,
++      key: KeyPair,
++      knownHosts: List<KnownHost>,
++      options: SshOptions = SshOptions(),
++    ): SshConnectResult {
++      require(hops.isNotEmpty()) { "An SSH connection needs at least one host." }
++      SshCrypto.ensureBouncyCastle()
++      val clients = ArrayList<SSHClient>(hops.size)
++      try {
++        for ((index, hop) in hops.withIndex()) {
++          val verifier = PinnedHostKeyVerifier(hop.knownHostsName, knownHosts)
++          val client = newClient(options, verifier)
++          try {
++            if (index == 0) {
++              client.connect(hop.host, hop.port)
++            } else {
++              client.connectVia(clients.last().newDirectConnection(hop.host, hop.port), hop.host, hop.port)
++            }
++          } catch (error: IOException) {
++            closeQuietly(client)
++            val rejection = verifier.rejection(hop) ?: throw error
++            closeAll(clients)
++            return SshConnectResult.Rejected(rejection)
++          }
++          clients += client
++          client.authPublickey(hop.user, KeyPairWrapper(key))
++        }
++      } catch (error: Throwable) {
++        closeAll(clients)
++        throw error
++      }
++      val session = SshSession(clients)
++      for (client in clients) {
++        client.transport.disconnectListener = DisconnectListener { _, _ -> session.onTransportDeath() }
++      }
++      return SshConnectResult.Connected(session)
++    }
++
++    /** Drops SHA-1, MD5, CBC, 3DES/RC4/Blowfish and DSA, which no OpenSSH since 7.4 needs. */
++    internal fun isAllowedAlgorithm(name: String): Boolean {
++      val lower = name.lowercase()
++      return lower !in WEAK_ALGORITHMS && WEAK_ALGORITHM_PARTS.none { it in lower }
++    }
++
++    private val WEAK_ALGORITHMS = setOf("ssh-rsa", "ssh-rsa-cert-v01@openssh.com")
++    private val WEAK_ALGORITHM_PARTS =
++      listOf("sha1", "md5", "ripemd", "-cbc", "3des", "arcfour", "blowfish", "dss")
++
++    private fun newClient(options: SshOptions, verifier: HostKeyVerifier): SSHClient {
++      // Strict key exchange (the Terrapin fix) is added by sshj's proposal, not these lists.
++      val config = DefaultConfig().apply {
++        keepAliveProvider = KeepAliveProvider.KEEP_ALIVE
++        setKeyExchangeFactories(getKeyExchangeFactories().filter { isAllowedAlgorithm(it.name) })
++        setCipherFactories(getCipherFactories().filter { isAllowedAlgorithm(it.name) })
++        setMACFactories(getMACFactories().filter { isAllowedAlgorithm(it.name) })
++        setKeyAlgorithms(getKeyAlgorithms().filter { isAllowedAlgorithm(it.name) })
++      }
++      return SSHClient(config).apply {
++        addHostKeyVerifier(verifier)
++        connectTimeout = options.connectTimeoutMs
++        connection.keepAlive.keepAliveInterval = options.keepAliveSeconds
++        (connection.keepAlive as? KeepAliveRunner)?.maxAliveCount = options.keepAliveMaxCount
++      }
++    }
++
++    private fun closeAll(clients: List<SSHClient>) {
++      for (client in clients.asReversed()) closeQuietly(client)
++    }
++
++    private fun closeQuietly(resource: Closeable) {
++      try {
++        resource.close()
++      } catch (_: IOException) {
++        // Nothing left to release.
++      }
++    }
++  }
++}
++
++/** Accepts exactly the keys known_hosts lists under one name and remembers what it saw. */
++private class PinnedHostKeyVerifier(
++  private val name: String,
++  knownHosts: List<KnownHost>,
++) : HostKeyVerifier {
++  private val entries = knownHosts.filter { it.matches(name) }
++
++  @Volatile private var presented: PublicKey? = null
++
++  @Volatile private var accepted = false
++
++  override fun verify(hostname: String, port: Int, key: PublicKey): Boolean {
++    presented = key
++    val type = KeyType.fromKey(key).toString()
++    val encoded = Base64.getEncoder().encodeToString(blobOf(key))
++    accepted = entries.any { it.keyType == type && it.keyBase64 == encoded }
++    return accepted
++  }
++
++  // Lets sshj negotiate the key type already on file, as OpenSSH does.
++  override fun findExistingAlgorithms(hostname: String, port: Int): List<String> =
++    entries.flatMap { if (it.keyType == "ssh-rsa") listOf("rsa-sha2-512", "rsa-sha2-256") else listOf(it.keyType) }
++      .distinct()
++
++  fun rejection(hop: SshHop): HostKeyRejection? {
++    val key = presented ?: return null
++    if (accepted) return null
++    val blob = blobOf(key)
++    return HostKeyRejection(
++      hop = hop,
++      keyType = KeyType.fromKey(key).toString(),
++      keyBase64 = Base64.getEncoder().encodeToString(blob),
++      fingerprint = sshFingerprint(blob),
++      changed = entries.isNotEmpty(),
++    )
++  }
++
++  private fun blobOf(key: PublicKey): ByteArray = Buffer.PlainBuffer().putPublicKey(key).compactData
++}
++
++/** Reads a stream to its end on its own thread, keeping at most the first MiB. */
++private class Drain(stream: InputStream) {
++  private val bytes = ByteArrayOutputStream()
++
++  private val worker = thread(isDaemon = true, name = "t3-ssh-exec-output") {
++    val buffer = ByteArray(8192)
++    try {
++      stream.use {
++        while (true) {
++          val read = it.read(buffer)
++          if (read < 0) break
++          val room = MAX_OUTPUT_BYTES - bytes.size()
++          if (room > 0) bytes.write(buffer, 0, minOf(read, room))
++        }
++      }
++    } catch (_: IOException) {
++      // The channel closed; keep what arrived.
++    }
++  }
++
++  fun await(): String {
++    worker.join(DRAIN_GRACE_MS)
++    return bytes.toString(Charsets.UTF_8.name())
++  }
++
++  private companion object {
++    const val MAX_OUTPUT_BYTES = 1 shl 20
++    const val DRAIN_GRACE_MS = 5_000L
++  }
++}
+diff --git a/apps/mobile/modules/t3-ssh/android/src/main/java/expo/modules/t3ssh/SshStore.kt b/apps/mobile/modules/t3-ssh/android/src/main/java/expo/modules/t3ssh/SshStore.kt
+new file mode 100644
+index 0000000000000000000000000000000000000000..3102436637b32e0bebd7ea53ebf132007732fea4
+--- /dev/null
++++ b/apps/mobile/modules/t3-ssh/android/src/main/java/expo/modules/t3ssh/SshStore.kt
+@@ -0,0 +1,143 @@
++package expo.modules.t3ssh
++
++import android.security.keystore.KeyGenParameterSpec
++import android.security.keystore.KeyProperties
++import java.io.File
++import java.security.KeyStore
++import javax.crypto.Cipher
++import javax.crypto.KeyGenerator
++import javax.crypto.SecretKey
++import javax.crypto.spec.GCMParameterSpec
++
++/** Encrypts the key seed at rest. */
++interface SeedSealer {
++  fun seal(plain: ByteArray): ByteArray
++
++  fun open(sealed: ByteArray): ByteArray
++
++  fun forget()
++}
++
++/**
++ * The app's SSH state, in one private directory: the key (sealed seed plus its public line),
++ * the ssh config text and known_hosts. Kept out of backups, because a restored seed could not
++ * be opened without this device's keystore key anyway.
++ */
++class SshStore(private val dir: File, private val sealer: SeedSealer) {
++  private val configFile = File(dir, "config")
++  private val knownHostsFile = File(dir, "known_hosts")
++  private val publicKeyFile = File(dir, "id_ed25519.pub")
++  private val sealedSeedFile = File(dir, "id_ed25519.sealed")
++
++  @Synchronized
++  fun readConfig(): String = configFile.readOrEmpty()
++
++  @Synchronized
++  fun writeConfig(text: String) = writeAtomically(configFile, text)
++
++  @Synchronized
++  fun knownHosts(): List<KnownHost> = KnownHosts.parse(knownHostsFile.readOrEmpty())
++
++  /** Adds an entry. A name that already has a different key must be forgotten first. */
++  @Synchronized
++  fun trust(line: String) {
++    val entry = KnownHosts.parseLine(line) ?: throw IllegalArgumentException("Not a known_hosts line.")
++    val current = knownHosts()
++    if (current.any { it.keyType == entry.keyType && it.keyBase64 == entry.keyBase64 && it.names == entry.names }) {
++      return
++    }
++    val clash = current.firstOrNull { known -> entry.names.any(known::matches) }
++    if (clash != null) {
++      throw IllegalStateException("${clash.names.first()} already has a different trusted key. Remove it first.")
++    }
++    writeAtomically(knownHostsFile, (current + entry).joinToString("") { it.line + "\n" })
++  }
++
++  @Synchronized
++  fun forget(line: String) {
++    val entry = KnownHosts.parseLine(line) ?: return
++    writeAtomically(knownHostsFile, knownHosts().filter { it != entry }.joinToString("") { it.line + "\n" })
++  }
++
++  @Synchronized
++  fun publicKeyLine(): String? = publicKeyFile.takeIf { it.exists() }?.readText()?.trim()
++
++  /** The key, or null when none was created or this device can no longer open it. */
++  @Synchronized
++  fun key(): Ed25519Key? {
++    if (!sealedSeedFile.exists()) return null
++    return try {
++      Ed25519Key(sealer.open(sealedSeedFile.readBytes()))
++    } catch (_: Exception) {
++      null
++    }
++  }
++
++  /** Replaces any existing key with a new one and returns its public line. */
++  @Synchronized
++  fun createKey(comment: String): String {
++    val key = Ed25519Key.generate()
++    val line = key.publicKeyLine(comment)
++    writeAtomically(sealedSeedFile, sealer.seal(key.seedCopy()))
++    writeAtomically(publicKeyFile, line + "\n")
++    return line
++  }
++
++  @Synchronized
++  fun deleteKey() {
++    sealedSeedFile.delete()
++    publicKeyFile.delete()
++    sealer.forget()
++  }
++
++  private fun File.readOrEmpty(): String = if (exists()) readText() else ""
++
++  private fun writeAtomically(file: File, text: String) = writeAtomically(file, text.toByteArray())
++
++  private fun writeAtomically(file: File, bytes: ByteArray) {
++    dir.mkdirs()
++    val temp = File(dir, file.name + ".tmp")
++    temp.writeBytes(bytes)
++    if (!temp.renameTo(file)) throw java.io.IOException("Could not save ${file.name}.")
++  }
++}
++
++/** AES-256-GCM with a key that never leaves the Android keystore. */
++object KeystoreSealer : SeedSealer {
++  private const val ALIAS = "t3-ssh-key-seal"
++  private const val VERSION: Byte = 1
++  private const val IV_BYTES = 12
++  private const val TAG_BITS = 128
++
++  override fun seal(plain: ByteArray): ByteArray {
++    val cipher = Cipher.getInstance("AES/GCM/NoPadding")
++    cipher.init(Cipher.ENCRYPT_MODE, secretKey())
++    return byteArrayOf(VERSION) + cipher.iv + cipher.doFinal(plain)
++  }
++
++  override fun open(sealed: ByteArray): ByteArray {
++    require(sealed.size > 1 + IV_BYTES && sealed[0] == VERSION) { "Unknown sealed key format." }
++    val cipher = Cipher.getInstance("AES/GCM/NoPadding")
++    cipher.init(Cipher.DECRYPT_MODE, secretKey(), GCMParameterSpec(TAG_BITS, sealed, 1, IV_BYTES))
++    return cipher.doFinal(sealed, 1 + IV_BYTES, sealed.size - 1 - IV_BYTES)
++  }
++
++  override fun forget() {
++    keyStore().deleteEntry(ALIAS)
++  }
++
++  private fun keyStore(): KeyStore = KeyStore.getInstance("AndroidKeyStore").apply { load(null) }
++
++  private fun secretKey(): SecretKey {
++    (keyStore().getKey(ALIAS, null) as? SecretKey)?.let { return it }
++    val generator = KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_AES, "AndroidKeyStore")
++    generator.init(
++      KeyGenParameterSpec.Builder(ALIAS, KeyProperties.PURPOSE_ENCRYPT or KeyProperties.PURPOSE_DECRYPT)
++        .setBlockModes(KeyProperties.BLOCK_MODE_GCM)
++        .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE)
++        .setKeySize(256)
++        .build(),
++    )
++    return generator.generateKey()
++  }
++}
+diff --git a/apps/mobile/modules/t3-ssh/android/src/main/java/expo/modules/t3ssh/T3SshModule.kt b/apps/mobile/modules/t3-ssh/android/src/main/java/expo/modules/t3ssh/T3SshModule.kt
+new file mode 100644
+index 0000000000000000000000000000000000000000..c4aa3eeb1d7f745c962bb3a5d2a2e44a3e0f29ac
+--- /dev/null
++++ b/apps/mobile/modules/t3-ssh/android/src/main/java/expo/modules/t3ssh/T3SshModule.kt
+@@ -0,0 +1,152 @@
++package expo.modules.t3ssh
++
++import expo.modules.kotlin.exception.CodedException
++import expo.modules.kotlin.exception.Exceptions
++import expo.modules.kotlin.functions.Coroutine
++import expo.modules.kotlin.modules.Module
++import expo.modules.kotlin.modules.ModuleDefinition
++import expo.modules.kotlin.records.Field
++import expo.modules.kotlin.records.Record
++import kotlinx.coroutines.Dispatchers
++import kotlinx.coroutines.withContext
++import net.schmizz.sshj.userauth.UserAuthException
++import java.io.File
++import java.net.ConnectException
++import java.net.NoRouteToHostException
++import java.net.SocketTimeoutException
++import java.net.UnknownHostException
++import java.util.Base64
++import java.util.UUID
++import java.util.concurrent.ConcurrentHashMap
++
++class SshHopRecord : Record {
++  @Field val host: String = ""
++
++  @Field val port: Int = 22
++
++  @Field val user: String = ""
++
++  @Field val hostKeyAlias: String? = null
++}
++
++/**
++ * SSH for the app's SSH environments. The private key never leaves this module: JavaScript
++ * sees the public line, fingerprints and session ids.
++ */
++class T3SshModule : Module() {
++  private val sessions = ConcurrentHashMap<String, SshSession>()
++
++  private val store: SshStore by lazy {
++    val context = appContext.reactContext ?: throw Exceptions.ReactContextLost()
++    SshStore(File(context.noBackupFilesDir, "t3-ssh"), KeystoreSealer)
++  }
++
++  override fun definition() = ModuleDefinition {
++    Name("T3Ssh")
++
++    OnDestroy {
++      for (session in sessions.values) session.close()
++      sessions.clear()
++    }
++
++    AsyncFunction("getPublicKey") Coroutine { -> io { store.publicKeyLine()?.let(::publicKeyInfo) } }
++
++    AsyncFunction("createKey") Coroutine { comment: String -> io { publicKeyInfo(store.createKey(comment)) } }
++
++    AsyncFunction("deleteKey") Coroutine { -> io { store.deleteKey() } }
++
++    AsyncFunction("readConfig") Coroutine { -> io { store.readConfig() } }
++
++    AsyncFunction("writeConfig") Coroutine { text: String -> io { store.writeConfig(text) } }
++
++    AsyncFunction("listKnownHosts") Coroutine { ->
++      io {
++        store.knownHosts().map { entry ->
++          mapOf(
++            "line" to entry.line,
++            "names" to entry.names,
++            "keyType" to entry.keyType,
++            "fingerprint" to sshFingerprint(Base64.getDecoder().decode(entry.keyBase64)),
++          )
++        }
++      }
++    }
++
++    AsyncFunction("trustHostKey") Coroutine { line: String -> io { store.trust(line) } }
++
++    AsyncFunction("forgetHostKey") Coroutine { line: String -> io { store.forget(line) } }
++
++    AsyncFunction("connect") Coroutine { hops: List<SshHopRecord> -> io { connect(hops) } }
++
++    AsyncFunction("exec") Coroutine { sessionId: String, command: String, stdin: String, timeoutMs: Double ->
++      io {
++        val result = session(sessionId).exec(command, stdin, timeoutMs.toLong())
++        mapOf("exitCode" to result.exitCode, "stdout" to result.stdout, "stderr" to result.stderr)
++      }
++    }
++
++    AsyncFunction("forward") Coroutine { sessionId: String, remotePort: Int ->
++      io { session(sessionId).forward(remotePort) }
++    }
++
++    Function("isOpen") { sessionId: String -> sessions[sessionId]?.isOpen == true }
++
++    AsyncFunction("close") Coroutine { sessionId: String -> io { sessions.remove(sessionId)?.close() } }
++  }
++
++  private fun connect(hops: List<SshHopRecord>): Map<String, Any?> {
++    val key = store.key() ?: throw CodedException("ERR_SSH_NO_KEY", "Create an SSH key first.", null)
++    sessions.entries.removeIf { !it.value.isOpen }
++    val result = SshSession.connect(
++      hops.map { SshHop(it.host, it.port, it.user, it.hostKeyAlias) },
++      key.toKeyPair(),
++      store.knownHosts(),
++    )
++    return when (result) {
++      is SshConnectResult.Connected -> {
++        val id = UUID.randomUUID().toString()
++        sessions[id] = result.session
++        mapOf("status" to "connected", "sessionId" to id)
++      }
++      is SshConnectResult.Rejected -> with(result.rejection) {
++        mapOf(
++          "status" to "host-key-rejected",
++          "host" to hop.host,
++          "port" to hop.port,
++          "knownHostsName" to hop.knownHostsName,
++          "keyType" to keyType,
++          "fingerprint" to fingerprint,
++          "knownHostsLine" to knownHostsLine,
++          "changed" to changed,
++        )
++      }
++    }
++  }
++
++  private fun session(id: String): SshSession =
++    sessions[id]?.takeIf { it.isOpen }
++      ?: throw CodedException("ERR_SSH_SESSION_CLOSED", "The SSH connection closed.", null)
++
++  private fun publicKeyInfo(line: String): Map<String, String> {
++    val blob = Base64.getDecoder().decode(line.split(Regex("\\s+"))[1])
++    return mapOf("line" to line, "fingerprint" to sshFingerprint(blob))
++  }
++
++  private suspend fun <T> io(block: () -> T): T = withContext(Dispatchers.IO) {
++    try {
++      block()
++    } catch (error: CodedException) {
++      throw error
++    } catch (error: UserAuthException) {
++      throw CodedException("ERR_SSH_AUTH", "The server did not accept this device's key.", error)
++    } catch (error: Exception) {
++      val unreachable = error is UnknownHostException || error is ConnectException ||
++        error is NoRouteToHostException || error is SocketTimeoutException
++      throw CodedException(
++        if (unreachable) "ERR_SSH_UNREACHABLE" else "ERR_SSH",
++        error.message ?: error.javaClass.simpleName,
++        error,
++      )
++    }
++  }
++}
+diff --git a/apps/mobile/modules/t3-ssh/android/src/test/java/expo/modules/t3ssh/KnownHostsTest.kt b/apps/mobile/modules/t3-ssh/android/src/test/java/expo/modules/t3ssh/KnownHostsTest.kt
+new file mode 100644
+index 0000000000000000000000000000000000000000..1c551583d9914681b7b21627aa47a7959198f051
+--- /dev/null
++++ b/apps/mobile/modules/t3-ssh/android/src/test/java/expo/modules/t3ssh/KnownHostsTest.kt
+@@ -0,0 +1,44 @@
++package expo.modules.t3ssh
++
++import org.junit.Assert.assertEquals
++import org.junit.Assert.assertNull
++import org.junit.Test
++
++class KnownHostsTest {
++  private val key = Ed25519Key.generate().publicKeyLine("").split(" ")[1]
++
++  @Test
++  fun port22IsFiledUnderTheBareHostAndOtherPortsInBrackets() {
++    assertEquals("example.com", KnownHosts.name("example.com", 22))
++    assertEquals("[127.0.0.1]:2222", KnownHosts.name("127.0.0.1", 2222))
++  }
++
++  @Test
++  fun parsesPlainEntriesWithSeveralNamesAndAComment() {
++    val entries = KnownHosts.parse(
++      """
++      # comment
++
++      example.com,[10.0.0.1]:2222 ssh-ed25519 $key laptop
++      """.trimIndent(),
++    )
++
++    assertEquals(listOf(KnownHost(listOf("example.com", "[10.0.0.1]:2222"), "ssh-ed25519", key)), entries)
++    assertEquals(true, entries.single().matches("[10.0.0.1]:2222"))
++  }
++
++  @Test
++  fun entriesThatCouldTrustTheWrongHostAreSkipped() {
++    for (line in listOf(
++      "|1|c2FsdA==|aGFzaA== ssh-ed25519 $key",
++      "@cert-authority *.example.com ssh-ed25519 $key",
++      "@revoked example.com ssh-ed25519 $key",
++      "*.example.com ssh-ed25519 $key",
++      "host?.example.com ssh-ed25519 $key",
++      "example.com ssh-ed25519 not*base64",
++      "example.com ssh-ed25519",
++    )) {
++      assertNull(line, KnownHosts.parseLine(line))
++    }
++  }
++}
+diff --git a/apps/mobile/modules/t3-ssh/android/src/test/java/expo/modules/t3ssh/SshKeysTest.kt b/apps/mobile/modules/t3-ssh/android/src/test/java/expo/modules/t3ssh/SshKeysTest.kt
+new file mode 100644
+index 0000000000000000000000000000000000000000..a75afb2a39593f3e383419b0300e3dbb9b68d886
+--- /dev/null
++++ b/apps/mobile/modules/t3-ssh/android/src/test/java/expo/modules/t3ssh/SshKeysTest.kt
+@@ -0,0 +1,61 @@
++package expo.modules.t3ssh
++
++import org.junit.Assert.assertArrayEquals
++import org.junit.Assert.assertEquals
++import org.junit.Assert.assertThrows
++import org.junit.Assert.assertTrue
++import org.junit.Assume.assumeTrue
++import org.junit.Rule
++import org.junit.Test
++import org.junit.rules.TemporaryFolder
++import java.io.File
++import java.security.Signature
++
++class SshKeysTest {
++  @get:Rule val tmp = TemporaryFolder()
++
++  @Test
++  fun thePublicLineIsOneSshKeygenReadsWithTheSameFingerprint() {
++    assumeTrue(TestSshd.available)
++    val key = Ed25519Key.generate()
++    val file = File(tmp.root, "id.pub").apply { writeText(key.publicKeyLine("t3 phone") + "\n") }
++
++    val listed = run("ssh-keygen", "-l", "-E", "sha256", "-f", file.path).trim().split(" ")
++
++    assertEquals("256", listed[0])
++    assertEquals(key.fingerprint(), listed[1])
++    assertEquals("t3", listed[2])
++    assertEquals("(ED25519)", listed.last())
++  }
++
++  @Test
++  fun aSeedAlwaysGivesTheSameKeyAndItsKeyPairSigns() {
++    val key = Ed25519Key.generate()
++    val again = Ed25519Key(key.seedCopy())
++    assertArrayEquals(key.publicKey, again.publicKey)
++
++    val pair = again.toKeyPair()
++    val message = "challenge".toByteArray()
++    val signature = Signature.getInstance("Ed25519", "BC").run {
++      initSign(pair.private)
++      update(message)
++      sign()
++    }
++    val verifies = Signature.getInstance("Ed25519", "BC").run {
++      initVerify(key.toKeyPair().public)
++      update(message)
++      verify(signature)
++    }
++    assertTrue(verifies)
++  }
++
++  @Test
++  fun aBlankCommentLeavesItOff() {
++    assertEquals(2, Ed25519Key.generate().publicKeyLine("  ").split(" ").size)
++  }
++
++  @Test
++  fun aSeedMustBe32Bytes() {
++    assertThrows(IllegalArgumentException::class.java) { Ed25519Key(ByteArray(31)) }
++  }
++}
+diff --git a/apps/mobile/modules/t3-ssh/android/src/test/java/expo/modules/t3ssh/SshSessionTest.kt b/apps/mobile/modules/t3-ssh/android/src/test/java/expo/modules/t3ssh/SshSessionTest.kt
+new file mode 100644
+index 0000000000000000000000000000000000000000..847cc9007243888c1ef5760682ad1fa88a9ba1f6
+--- /dev/null
++++ b/apps/mobile/modules/t3-ssh/android/src/test/java/expo/modules/t3ssh/SshSessionTest.kt
+@@ -0,0 +1,203 @@
++package expo.modules.t3ssh
++
++import net.schmizz.sshj.userauth.UserAuthException
++import org.junit.After
++import org.junit.Assert.assertEquals
++import org.junit.Assert.assertFalse
++import org.junit.Assert.assertNotEquals
++import org.junit.Assert.assertThrows
++import org.junit.Assert.assertTrue
++import org.junit.Assume.assumeTrue
++import org.junit.Before
++import org.junit.Rule
++import org.junit.Test
++import org.junit.rules.TemporaryFolder
++import java.io.Closeable
++import java.io.IOException
++import java.net.HttpURLConnection
++import java.net.InetAddress
++import java.net.Socket
++import java.net.URL
++import java.util.concurrent.Callable
++import java.util.concurrent.Executors
++
++/** Runs against real OpenSSH servers this test starts on loopback. */
++class SshSessionTest {
++  @get:Rule val tmp = TemporaryFolder()
++
++  private val key = Ed25519Key.generate()
++  private val cleanup = mutableListOf<Closeable>()
++
++  @Before
++  fun requireOpenSsh() = assumeTrue("needs OpenSSH's sshd and ssh-keygen", TestSshd.available)
++
++  @After
++  fun tearDown() {
++    for (resource in cleanup.asReversed()) runCatching { resource.close() }
++  }
++
++  @Test
++  fun execPassesStdinAndReportsOutputAndExitCode() {
++    val server = sshd()
++    val session = connected(listOf(hop(server)), listOf(server.knownHost()))
++
++    val result = session.exec("sh -s -- first", "echo \"out \$1\"; echo err >&2; cat; exit 3\nrest of stdin\n", 10_000)
++
++    assertEquals(3, result.exitCode)
++    assertEquals("out first\n", result.stdout)
++    assertEquals("err\n", result.stderr)
++  }
++
++  @Test
++  fun anUnknownHostKeyIsRejectedWithTheFingerprintSshKeygenShows() {
++    val server = sshd()
++
++    val rejection = rejected(listOf(hop(server)), emptyList())
++
++    val keygen = run("ssh-keygen", "-l", "-E", "sha256", "-f", server.hostKeyPublicFile.path).split(" ")[1]
++    assertEquals(keygen, rejection.fingerprint)
++    assertFalse(rejection.changed)
++    assertEquals("[127.0.0.1]:${server.port} ${server.hostKeyType} ${server.hostKeyBase64}", rejection.knownHostsLine)
++  }
++
++  @Test
++  fun aDifferentKeyOnFileIsReportedAsChanged() {
++    val server = sshd()
++    val other = Ed25519Key.generate().publicKeyLine("").split(" ")
++    val stale = KnownHost(listOf(KnownHosts.name("127.0.0.1", server.port)), other[0], other[1])
++
++    val rejection = rejected(listOf(hop(server)), listOf(stale))
++
++    assertTrue(rejection.changed)
++  }
++
++  @Test
++  fun aHostKeyAliasNamesTheEntryThatIsChecked() {
++    val server = sshd()
++    val filedUnderAlias = server.knownHost("box")
++
++    connected(listOf(hop(server, alias = "box")), listOf(filedUnderAlias))
++    assertFalse(rejected(listOf(hop(server)), listOf(filedUnderAlias)).changed)
++  }
++
++  @Test
++  fun connectsThroughAJumpHostWhoseKeyCanOnlyReachTheTarget() {
++    val target = sshd()
++    val jump = sshd(authorized = tunnelOnly(target.port))
++    val known = listOf(jump.knownHost(), target.knownHost())
++
++    val session = connected(listOf(hop(jump), hop(target)), known)
++    assertEquals("via jump\n", session.exec("echo via jump", "", 10_000).stdout)
++
++    // The same key gets no shell on the jump host and no other destination.
++    val onJump = connected(listOf(hop(jump)), known)
++    assertNotEquals(0, onJump.exec("echo shell", "", 10_000).exitCode)
++    val elsewhere = freeLoopbackPort()
++    assertThrows(IOException::class.java) {
++      SshSession.connect(listOf(hop(jump), SshHop("127.0.0.1", elsewhere, TestSshd.user)), key.toKeyPair(), known)
++    }
++  }
++
++  @Test
++  fun aForwardReachesALoopbackServiceOnTheTarget() {
++    val server = sshd()
++    val service = httpService("hello from the target")
++    val session = connected(listOf(hop(server)), listOf(server.knownHost()))
++
++    val localPort = session.forward(service)
++
++    val pool = Executors.newFixedThreadPool(4)
++    try {
++      val bodies = pool.invokeAll(List(8) { Callable { get(localPort) } }).map { it.get() }
++      assertEquals(List(8) { "hello from the target" }, bodies)
++    } finally {
++      pool.shutdownNow()
++    }
++  }
++
++  @Test
++  fun aDeadNetworkClosesTheForwardedPortInsteadOfLeavingItHanging() {
++    val server = sshd()
++    val relay = TcpRelay(server.port).also(cleanup::add)
++    val service = httpService("alive")
++    val hop = SshHop("127.0.0.1", relay.port, TestSshd.user, hostKeyAlias = "relayed")
++    val options = SshOptions(keepAliveSeconds = 1, keepAliveMaxCount = 2)
++    val session = connected(listOf(hop), listOf(server.knownHost("relayed")), options)
++    val localPort = session.forward(service)
++    assertEquals("alive", get(localPort))
++
++    relay.blackhole()
++
++    eventually { !session.isOpen }
++    eventually { refusesConnections(localPort) }
++  }
++
++  @Test
++  fun aKeyTheServerDoesNotListFailsAuthentication() {
++    val server = sshd(authorized = Ed25519Key.generate().publicKeyLine("someone else"))
++
++    assertThrows(UserAuthException::class.java) {
++      SshSession.connect(listOf(hop(server)), key.toKeyPair(), listOf(server.knownHost()))
++    }
++  }
++
++  @Test
++  fun closingTheSessionClosesItsForwards() {
++    val server = sshd()
++    val session = connected(listOf(hop(server)), listOf(server.knownHost()))
++    val localPort = session.forward(httpService("x"))
++
++    session.close()
++
++    assertFalse(session.isOpen)
++    eventually { refusesConnections(localPort) }
++  }
++
++  @Test
++  fun weakAlgorithmsAreNotOffered() {
++    for (weak in listOf("hmac-sha1", "diffie-hellman-group14-sha1", "aes128-cbc", "ssh-rsa", "ssh-dss", "3des-cbc")) {
++      assertFalse(weak, SshSession.isAllowedAlgorithm(weak))
++    }
++    for (modern in listOf("curve25519-sha256", "chacha20-poly1305@openssh.com", "aes256-gcm@openssh.com",
++      "hmac-sha2-256-etm@openssh.com", "ssh-ed25519", "rsa-sha2-512", "ecdh-sha2-nistp256")) {
++      assertTrue(modern, SshSession.isAllowedAlgorithm(modern))
++    }
++  }
++
++  private fun sshd(authorized: String = key.publicKeyLine("test"), extra: String = "") =
++    TestSshd(tmp.newFolder(), authorized, extra).also(cleanup::add)
++
++  private fun tunnelOnly(targetPort: Int) =
++    "restrict,port-forwarding,permitopen=\"127.0.0.1:$targetPort\",command=\"/bin/false\" ${key.publicKeyLine("jump")}"
++
++  private fun hop(server: TestSshd, alias: String? = null) = SshHop("127.0.0.1", server.port, TestSshd.user, alias)
++
++  private fun connected(hops: List<SshHop>, known: List<KnownHost>, options: SshOptions = SshOptions()): SshSession {
++    val result = SshSession.connect(hops, key.toKeyPair(), known, options)
++    check(result is SshConnectResult.Connected) { "expected a connection, got $result" }
++    cleanup += result.session
++    return result.session
++  }
++
++  private fun rejected(hops: List<SshHop>, known: List<KnownHost>): HostKeyRejection {
++    val result = SshSession.connect(hops, key.toKeyPair(), known)
++    if (result is SshConnectResult.Connected) cleanup += result.session
++    check(result is SshConnectResult.Rejected) { "expected a host key rejection, got $result" }
++    return result.rejection
++  }
++
++  private fun httpService(body: String): Int = TestHttpService(body).also(cleanup::add).port
++
++  private fun get(port: Int): String {
++    val connection = URL("http://127.0.0.1:$port/").openConnection() as HttpURLConnection
++    connection.connectTimeout = 5_000
++    connection.readTimeout = 5_000
++    return connection.inputStream.use { it.readBytes().decodeToString() }
++  }
++
++  private fun refusesConnections(port: Int): Boolean = try {
++    Socket(InetAddress.getLoopbackAddress(), port).use { false }
++  } catch (_: IOException) {
++    true
++  }
++}
+diff --git a/apps/mobile/modules/t3-ssh/android/src/test/java/expo/modules/t3ssh/SshStoreTest.kt b/apps/mobile/modules/t3-ssh/android/src/test/java/expo/modules/t3ssh/SshStoreTest.kt
+new file mode 100644
+index 0000000000000000000000000000000000000000..2436bf01189bdb0043269e3e48c6493d16500a5c
+--- /dev/null
++++ b/apps/mobile/modules/t3-ssh/android/src/test/java/expo/modules/t3ssh/SshStoreTest.kt
+@@ -0,0 +1,85 @@
++package expo.modules.t3ssh
++
++import org.junit.Assert.assertEquals
++import org.junit.Assert.assertNull
++import org.junit.Assert.assertThrows
++import org.junit.Rule
++import org.junit.Test
++import org.junit.rules.TemporaryFolder
++
++class SshStoreTest {
++  @get:Rule val tmp = TemporaryFolder()
++
++  // Like AES-GCM, opening with a different key fails instead of yielding other bytes.
++  private class XorSealer : SeedSealer {
++    var mask: Byte = 0x5a
++
++    override fun seal(plain: ByteArray) = byteArrayOf(mask) + xor(plain)
++
++    override fun open(sealed: ByteArray): ByteArray {
++      check(sealed[0] == mask) { "tag mismatch" }
++      return xor(sealed.copyOfRange(1, sealed.size))
++    }
++
++    override fun forget() {
++      mask = 0x11
++    }
++
++    private fun xor(bytes: ByteArray) = ByteArray(bytes.size) { (bytes[it].toInt() xor mask.toInt()).toByte() }
++  }
++
++  private val sealer = XorSealer()
++  private val store by lazy { SshStore(tmp.newFolder("t3-ssh"), sealer) }
++
++  @Test
++  fun aCreatedKeyReopensWithTheSamePublicLine() {
++    val line = store.createKey("t3 test")
++
++    assertEquals(line, store.publicKeyLine())
++    assertEquals(line, store.key()?.publicKeyLine("t3 test"))
++  }
++
++  @Test
++  fun aKeyThisDeviceCanNoLongerOpenReadsAsMissing() {
++    store.createKey("t3")
++    sealer.mask = 0x22
++
++    assertNull(store.key())
++  }
++
++  @Test
++  fun deletingTheKeyForgetsItsSealingKeyToo() {
++    store.createKey("t3")
++
++    store.deleteKey()
++
++    assertNull(store.key())
++    assertNull(store.publicKeyLine())
++    assertEquals(0x11.toByte(), sealer.mask)
++  }
++
++  @Test
++  fun trustingIsIdempotentAndRefusesASecondKeyForAName() {
++    val first = "[127.0.0.1]:2222 ssh-ed25519 ${keyBase64()}"
++    store.trust(first)
++    store.trust(first)
++    assertEquals(listOf(first), store.knownHosts().map { it.line })
++
++    assertThrows(IllegalStateException::class.java) {
++      store.trust("[127.0.0.1]:2222 ssh-ed25519 ${keyBase64()}")
++    }
++
++    store.forget(first)
++    assertEquals(emptyList<KnownHost>(), store.knownHosts())
++  }
++
++  @Test
++  fun theConfigTextRoundTrips() {
++    assertEquals("", store.readConfig())
++    store.writeConfig("Host box\n  HostName 127.0.0.1\n")
++
++    assertEquals("Host box\n  HostName 127.0.0.1\n", store.readConfig())
++  }
++
++  private fun keyBase64() = Ed25519Key.generate().publicKeyLine("").split(" ")[1]
++}
+diff --git a/apps/mobile/modules/t3-ssh/android/src/test/java/expo/modules/t3ssh/T3ServerEndToEndTest.kt b/apps/mobile/modules/t3-ssh/android/src/test/java/expo/modules/t3ssh/T3ServerEndToEndTest.kt
+new file mode 100644
+index 0000000000000000000000000000000000000000..9b1df2f89bec8d957b42e6c07f08b42f00126229
+--- /dev/null
++++ b/apps/mobile/modules/t3-ssh/android/src/test/java/expo/modules/t3ssh/T3ServerEndToEndTest.kt
+@@ -0,0 +1,117 @@
++package expo.modules.t3ssh
++
++import org.junit.After
++import org.junit.Assert.assertEquals
++import org.junit.Assert.assertTrue
++import org.junit.Assume.assumeTrue
++import org.junit.Rule
++import org.junit.Test
++import org.junit.rules.TemporaryFolder
++import java.io.Closeable
++import java.io.File
++import java.net.HttpURLConnection
++import java.net.URL
++import java.net.URLEncoder
++
++/**
++ * The desktop's own launch and pairing scripts, run through a tunnel-only jump host, start a
++ * real t3 server in a throwaway HOME, and the forwarded port pairs and authenticates.
++ *
++ * Opt-in, because it downloads a t3 release: write the scripts with
++ * `node apps/mobile/modules/t3-ssh/e2e/write-remote-scripts.ts <dir> <t3 version>` (from
++ * apps/mobile), then run the unit tests with T3_SSH_E2E_SCRIPTS=<dir> and
++ * T3_SSH_E2E_HOME=<empty directory>.
++ */
++class T3ServerEndToEndTest {
++  @get:Rule val tmp = TemporaryFolder()
++
++  private val key = Ed25519Key.generate()
++  private val cleanup = mutableListOf<Closeable>()
++
++  @After
++  fun tearDown() {
++    for (resource in cleanup.asReversed()) runCatching { resource.close() }
++  }
++
++  @Test
++  fun theDesktopScriptsStartAPairableServerThroughAJumpHost() {
++    val scripts = System.getenv("T3_SSH_E2E_SCRIPTS")?.let(::File)
++    val home = System.getenv("T3_SSH_E2E_HOME")
++    assumeTrue("set T3_SSH_E2E_SCRIPTS and T3_SSH_E2E_HOME", scripts != null && home != null && TestSshd.available)
++    scripts!!
++    val stateKey = File(scripts, "state-key").readText().trim()
++
++    val target = sshd("environment=\"HOME=$home\" ${key.publicKeyLine("e2e")}", "PermitUserEnvironment yes")
++    val jump = sshd(
++      "restrict,port-forwarding,permitopen=\"127.0.0.1:${target.port}\",command=\"/bin/false\" " +
++        key.publicKeyLine("e2e jump"),
++    )
++    val result = SshSession.connect(
++      listOf(SshHop("127.0.0.1", jump.port, TestSshd.user), SshHop("127.0.0.1", target.port, TestSshd.user)),
++      key.toKeyPair(),
++      listOf(jump.knownHost(), target.knownHost()),
++    )
++    val session = (result as SshConnectResult.Connected).session.also(cleanup::add)
++
++    val launch = session.exec("sh -l -s -- $stateKey", File(scripts, "launch.sh").readText(), LAUNCH_TIMEOUT_MS)
++    assertEquals(launch.stderr, 0, launch.exitCode)
++    val remotePort = field(launch.stdout, "remotePort").toInt()
++    try {
++      val localPort = session.forward(remotePort)
++
++      val descriptor = http(localPort, "/.well-known/t3/environment")
++      assertTrue(descriptor, descriptor.contains("\"environmentId\""))
++
++      val pairing = session.exec("sh -s", File(scripts, "pairing.sh").readText(), LAUNCH_TIMEOUT_MS)
++      assertEquals(pairing.stderr, 0, pairing.exitCode)
++      val token = http(
++        localPort,
++        "/oauth/token",
++        form = mapOf(
++          "grant_type" to "urn:ietf:params:oauth:grant-type:token-exchange",
++          "subject_token" to field(pairing.stdout, "credential"),
++          "subject_token_type" to "urn:t3:params:oauth:token-type:environment-bootstrap",
++          "requested_token_type" to "urn:ietf:params:oauth:token-type:access_token",
++        ),
++      )
++      val sessionState = http(localPort, "/api/auth/session", bearer = field(token, "access_token"))
++      assertTrue(sessionState, sessionState.contains("\"authenticated\":true"))
++
++      // A second launch finds the running server instead of starting another.
++      val again = session.exec("sh -l -s -- $stateKey", File(scripts, "launch.sh").readText(), LAUNCH_TIMEOUT_MS)
++      assertEquals(remotePort, field(again.stdout, "remotePort").toInt())
++    } finally {
++      session.exec("sh -s", File(scripts, "stop.sh").readText(), 60_000)
++    }
++  }
++
++  private fun sshd(authorized: String, extra: String = "") =
++    TestSshd(tmp.newFolder(), authorized, extra).also(cleanup::add)
++
++  private fun field(json: String, name: String): String =
++    Regex("\"$name\"\\s*:\\s*\"?([^\",}]+)").find(json)?.groupValues?.get(1)
++      ?: throw AssertionError("no $name in: $json")
++
++  private fun http(port: Int, path: String, form: Map<String, String>? = null, bearer: String? = null): String {
++    val connection = URL("http://127.0.0.1:$port$path").openConnection() as HttpURLConnection
++    connection.connectTimeout = 10_000
++    connection.readTimeout = 30_000
++    bearer?.let { connection.setRequestProperty("Authorization", "Bearer $it") }
++    if (form != null) {
++      connection.requestMethod = "POST"
++      connection.doOutput = true
++      connection.setRequestProperty("Content-Type", "application/x-www-form-urlencoded")
++      val body = form.entries.joinToString("&") { (k, v) -> "$k=${URLEncoder.encode(v, "UTF-8")}" }
++      connection.outputStream.use { it.write(body.toByteArray()) }
++    }
++    val stream = if (connection.responseCode < 400) connection.inputStream else connection.errorStream
++    val text = stream.use { it.readBytes().decodeToString() }
++    check(connection.responseCode < 400) { "$path answered ${connection.responseCode}: $text" }
++    return text
++  }
++
++  private companion object {
++    // The desktop's budget for a cold archive launch (download, unpack, start).
++    const val LAUNCH_TIMEOUT_MS = 900_000L
++  }
++}
+diff --git a/apps/mobile/modules/t3-ssh/android/src/test/java/expo/modules/t3ssh/TestServers.kt b/apps/mobile/modules/t3-ssh/android/src/test/java/expo/modules/t3ssh/TestServers.kt
+new file mode 100644
+index 0000000000000000000000000000000000000000..2cdc387cd80732931c3adff818af15a8b5148004
+--- /dev/null
++++ b/apps/mobile/modules/t3-ssh/android/src/test/java/expo/modules/t3ssh/TestServers.kt
+@@ -0,0 +1,199 @@
++package expo.modules.t3ssh
++
++import java.io.Closeable
++import java.io.File
++import java.io.IOException
++import java.net.InetAddress
++import java.net.InetSocketAddress
++import java.net.ServerSocket
++import java.net.Socket
++import java.util.concurrent.CopyOnWriteArrayList
++import java.util.concurrent.TimeUnit
++import kotlin.concurrent.thread
++
++/** A throwaway OpenSSH server on loopback, configured and owned by one test. */
++class TestSshd(
++  private val dir: File,
++  authorizedKeys: String,
++  extraConfig: String = "",
++) : Closeable {
++  val port: Int = freeLoopbackPort()
++  val hostKeyPublicFile = File(dir, "host_ed25519.pub")
++  val hostKeyType: String
++  val hostKeyBase64: String
++  private val process: Process
++
++  init {
++    val hostKey = File(dir, "host_ed25519")
++    run("ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-f", hostKey.path)
++    hostKeyPublicFile.readText().trim().split(" ").let {
++      hostKeyType = it[0]
++      hostKeyBase64 = it[1]
++    }
++    File(dir, "authorized_keys").writeText(authorizedKeys.trimEnd() + "\n")
++    val config = File(dir, "sshd_config")
++    config.writeText(
++      """
++      Port $port
++      ListenAddress 127.0.0.1
++      HostKey ${hostKey.path}
++      PidFile none
++      UsePAM no
++      StrictModes no
++      PubkeyAuthentication yes
++      PasswordAuthentication no
++      KbdInteractiveAuthentication no
++      PermitRootLogin prohibit-password
++      AuthorizedKeysFile ${File(dir, "authorized_keys").path}
++      AllowTcpForwarding yes
++      LogLevel VERBOSE
++      $extraConfig
++      """.trimIndent() + "\n",
++    )
++    process = ProcessBuilder(SSHD, "-D", "-e", "-f", config.path)
++      .redirectErrorStream(true)
++      .redirectOutput(File(dir, "sshd.log"))
++      .start()
++    awaitListening(port) { check(process.isAlive) { "sshd exited:\n${log()}" } }
++  }
++
++  /** This server's entry, filed under `[127.0.0.1]:port` unless given another name. */
++  fun knownHost(name: String = KnownHosts.name("127.0.0.1", port)) = KnownHost(listOf(name), hostKeyType, hostKeyBase64)
++
++  fun log(): String = File(dir, "sshd.log").takeIf { it.exists() }?.readText().orEmpty()
++
++  // Tests close their sessions first, which ends the per-connection sshd children.
++  override fun close() {
++    process.destroyForcibly()
++    process.waitFor(5, TimeUnit.SECONDS)
++  }
++
++  companion object {
++    private const val SSHD = "/usr/sbin/sshd"
++    val user: String = System.getProperty("user.name") ?: error("no user.name")
++
++    val available: Boolean
++      get() = File(SSHD).canExecute() && runCatching { run("ssh-keygen", "-?", check = false) }.isSuccess
++  }
++}
++
++/**
++ * Relays loopback TCP to a port. [blackhole] keeps every connection open but stops moving
++ * bytes, which is what a dropped mobile network looks like to both ends.
++ */
++class TcpRelay(private val targetPort: Int) : Closeable {
++  private val server = ServerSocket(0, 50, InetAddress.getLoopbackAddress())
++  private val sockets = CopyOnWriteArrayList<Socket>()
++
++  @Volatile private var flowing = true
++
++  val port: Int get() = server.localPort
++
++  init {
++    thread(isDaemon = true, name = "test-relay-accept") {
++      while (!server.isClosed) {
++        val client = try {
++          server.accept()
++        } catch (_: IOException) {
++          break
++        }
++        val upstream = Socket(InetAddress.getLoopbackAddress(), targetPort)
++        sockets += client
++        sockets += upstream
++        pump(client, upstream)
++        pump(upstream, client)
++      }
++    }
++  }
++
++  fun blackhole() {
++    flowing = false
++  }
++
++  override fun close() {
++    server.close()
++    for (socket in sockets) runCatching { socket.close() }
++  }
++
++  private fun pump(from: Socket, to: Socket) = thread(isDaemon = true, name = "test-relay-pump") {
++    val buffer = ByteArray(8192)
++    try {
++      while (true) {
++        val read = from.getInputStream().read(buffer)
++        if (read < 0) break
++        if (flowing) to.getOutputStream().write(buffer, 0, read)
++      }
++    } catch (_: IOException) {
++      // Either side closed.
++    } finally {
++      runCatching { to.close() }
++    }
++  }
++}
++
++/** Answers every HTTP request on loopback with one fixed body, then closes the connection. */
++class TestHttpService(body: String) : Closeable {
++  private val server = ServerSocket(0, 50, InetAddress.getLoopbackAddress())
++  private val response = body.toByteArray().let { bytes ->
++    "HTTP/1.1 200 OK\r\nContent-Length: ${bytes.size}\r\nConnection: close\r\n\r\n".toByteArray() + bytes
++  }
++
++  val port: Int get() = server.localPort
++
++  init {
++    thread(isDaemon = true, name = "test-http-accept") {
++      while (!server.isClosed) {
++        val socket = try {
++          server.accept()
++        } catch (_: IOException) {
++          break
++        }
++        thread(isDaemon = true, name = "test-http-request") {
++          socket.use {
++            val reader = it.getInputStream().bufferedReader()
++            while (reader.readLine()?.isNotEmpty() == true) {
++              // Skip the request line and headers.
++            }
++            it.getOutputStream().write(response)
++          }
++        }
++      }
++    }
++  }
++
++  override fun close() = server.close()
++}
++
++fun freeLoopbackPort(): Int = ServerSocket(0, 1, InetAddress.getLoopbackAddress()).use { it.localPort }
++
++fun run(vararg command: String, check: Boolean = true): String {
++  val process = ProcessBuilder(*command).redirectErrorStream(true).start()
++  val output = process.inputStream.bufferedReader().readText()
++  check(process.waitFor(30, TimeUnit.SECONDS)) { "${command.first()} timed out" }
++  if (check) check(process.exitValue() == 0) { "${command.joinToString(" ")} failed:\n$output" }
++  return output
++}
++
++/** Waits until something accepts connections on loopback `port`, with a hard ceiling. */
++fun awaitListening(port: Int, ceilingMs: Long = 10_000, stillStarting: () -> Unit = {}) {
++  val deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(ceilingMs)
++  while (true) {
++    stillStarting()
++    try {
++      Socket().use { it.connect(InetSocketAddress(InetAddress.getLoopbackAddress(), port), 200) }
++      return
++    } catch (_: IOException) {
++      check(System.nanoTime() < deadline) { "Nothing listened on $port within ${ceilingMs}ms." }
++      Thread.sleep(50)
++    }
++  }
++}
++
++/** Evaluates `condition` until it holds, failing after a hard ceiling. */
++fun eventually(ceilingMs: Long = 15_000, condition: () -> Boolean) {
++  val deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(ceilingMs)
++  while (!condition()) {
++    check(System.nanoTime() < deadline) { "Condition did not hold within ${ceilingMs}ms." }
++    Thread.sleep(50)
++  }
++}
+diff --git a/apps/mobile/modules/t3-ssh/e2e/write-remote-scripts.ts b/apps/mobile/modules/t3-ssh/e2e/write-remote-scripts.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..98ae7946326a415b32848cea9302665e15495529
+--- /dev/null
++++ b/apps/mobile/modules/t3-ssh/e2e/write-remote-scripts.ts
+@@ -0,0 +1,23 @@
++// Writes the scripts T3ServerEndToEndTest runs, exactly as the app builds them.
++// Usage (from apps/mobile): node modules/t3-ssh/e2e/write-remote-scripts.ts <dir> <t3 version>
++import * as NodeFS from "node:fs";
++import * as NodePath from "node:path";
++
++import {
++  buildRemoteLaunchScript,
++  buildRemotePairingScript,
++  buildRemoteStopScript,
++} from "@t3tools/ssh/remoteScripts";
++
++const [outDir, archiveVersion] = process.argv.slice(2);
++if (!outDir || !archiveVersion) {
++  console.error("usage: write-remote-scripts.ts <dir> <t3 version>");
++  process.exit(2);
++}
++const stateKey = "0123456789abcdef";
++const runner = { archiveVersion };
++NodeFS.mkdirSync(outDir, { recursive: true });
++NodeFS.writeFileSync(NodePath.join(outDir, "state-key"), stateKey);
++NodeFS.writeFileSync(NodePath.join(outDir, "launch.sh"), buildRemoteLaunchScript(runner));
++NodeFS.writeFileSync(NodePath.join(outDir, "pairing.sh"), buildRemotePairingScript(stateKey, runner));
++NodeFS.writeFileSync(NodePath.join(outDir, "stop.sh"), buildRemoteStopScript(stateKey));
+diff --git a/apps/mobile/modules/t3-ssh/expo-module.config.json b/apps/mobile/modules/t3-ssh/expo-module.config.json
+new file mode 100644
+index 0000000000000000000000000000000000000000..1b6d38f46cecb8b3c980202531c0b71b084caa50
+--- /dev/null
++++ b/apps/mobile/modules/t3-ssh/expo-module.config.json
+@@ -0,0 +1,4 @@
++{
++  "platforms": ["android"],
++  "android": { "modules": ["expo.modules.t3ssh.T3SshModule"] }
++}
+diff --git a/apps/mobile/package.json b/apps/mobile/package.json
+index c7342ef775668904e7be7272cface2a0a1882ae4..713101e9aec75ef07ccc3da8e6e5a6a3687af2cf 100644
+--- a/apps/mobile/package.json
++++ b/apps/mobile/package.json
+@@ -79,6 +79,7 @@
+     "@t3tools/mobile-source-text": "file:./modules/t3-source-text",
+     "@t3tools/mobile-terminal-native": "file:./modules/t3-terminal",
+     "@t3tools/shared": "workspace:*",
++    "@t3tools/ssh": "workspace:*",
+     "@tabler/icons-react-native": "^3.44.0",
+     "clsx": "^2.1.1",
+     "diff": "8.0.3",
+diff --git a/pnpm-lock.yaml b/pnpm-lock.yaml
+index b4fcab6002c6b8ec29133e5b970c47a0ec04ae51..0798c6f246865e5dc506f8d5681d13bfb4d029d0 100644
+--- a/pnpm-lock.yaml
++++ b/pnpm-lock.yaml
+@@ -624,6 +624,9 @@ importers:
+       '@t3tools/shared':
+         specifier: workspace:*
+         version: link:../../packages/shared
++      '@t3tools/ssh':
++        specifier: workspace:*
++        version: link:../../packages/ssh
+       '@tabler/icons-react-native':
+         specifier: ^3.44.0
+         version: 3.44.0(react-native-svg@15.16.1(patch_hash=7f94d240fc19418233c96f9a637dfd248846446657476c204f3614fd2847900e)(react-native@0.88.1(@babel/core@7.29.7(supports-color@8.1.1))(@react-native/metro-config@0.88.1(@babel/core@7.29.7(supports-color@8.1.1))(bufferutil@4.1.0)(supports-color@8.1.1)(utf-8-validate@6.0.6))(@types/react@19.3.0)(bufferutil@4.1.0)(react@19.3.0)(supports-color@8.1.1)(utf-8-validate@6.0.6))(react@19.3.0))(react@19.3.0)

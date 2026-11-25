@@ -1,0 +1,2403 @@
+diff --git a/apps/mobile/app.config.ts b/apps/mobile/app.config.ts
+index 4e2009e44e271dcb5a9b01937bb9fa15e46cfb60..31251a1c1bb3695b5f34a5996cc16f5af2aa4b33 100644
+--- a/apps/mobile/app.config.ts
++++ b/apps/mobile/app.config.ts
+@@ -329,6 +329,7 @@ const config: ExpoConfig = {
+     favicon: variant.assets.appIcon,
+   },
+   plugins: [
++    "./plugins/withAndroidClientCertificates.cjs",
+     "expo-asset",
+     [
+       "expo-font",
+diff --git a/apps/mobile/index.ts b/apps/mobile/index.ts
+index 6717c79f2f87a667b2964a1fd50fda7596eb772d..3ef5474d7804fc6ebfa804172de058016a841538 100644
+--- a/apps/mobile/index.ts
++++ b/apps/mobile/index.ts
+@@ -5,6 +5,7 @@ import "./src/features/development/behavior-probe-entry";
+ import "./src/i18n/intl-polyfills";
+ // Record errors thrown while the rest of the app loads.
+ import "./src/features/observability/observe";
++import "./src/lib/clientCertificates";
+ import { registerRootComponent } from "expo";
+ import "react-native-gesture-handler";
+ import { LogBox } from "react-native";
+diff --git a/apps/mobile/modules/t3-client-certificates/android/build.gradle b/apps/mobile/modules/t3-client-certificates/android/build.gradle
+new file mode 100644
+index 0000000000000000000000000000000000000000..94726d352ccdbe8281c91c65af14abbc515e278c
+--- /dev/null
++++ b/apps/mobile/modules/t3-client-certificates/android/build.gradle
+@@ -0,0 +1,17 @@
++plugins {
++  id 'com.android.library'
++  id 'expo-module-gradle-plugin'
++}
++group = 'com.t3tools.clientcertificates'
++version = '0.0.1'
++android {
++  namespace 'expo.modules.t3clientcertificates'
++  defaultConfig { versionCode 1; versionName '0.0.1' }
++}
++dependencies {
++  implementation 'com.facebook.react:react-android'
++  implementation 'com.squareup.okhttp3:okhttp:4.12.0'
++  testImplementation 'junit:junit:4.13.2'
++  testImplementation 'com.squareup.okhttp3:mockwebserver:4.12.0'
++  testImplementation 'com.squareup.okhttp3:okhttp-tls:4.12.0'
++}
+diff --git a/apps/mobile/modules/t3-client-certificates/android/src/main/java/expo/modules/t3clientcertificates/CertificateTls.kt b/apps/mobile/modules/t3-client-certificates/android/src/main/java/expo/modules/t3clientcertificates/CertificateTls.kt
+new file mode 100644
+index 0000000000000000000000000000000000000000..16ea65212f3c52e6ca2c607fd6ab223cb37882b1
+--- /dev/null
++++ b/apps/mobile/modules/t3-client-certificates/android/src/main/java/expo/modules/t3clientcertificates/CertificateTls.kt
+@@ -0,0 +1,143 @@
++package expo.modules.t3clientcertificates
++
++import java.io.IOException
++import java.net.InetAddress
++import java.net.Socket
++import java.security.Principal
++import java.security.PrivateKey
++import java.security.cert.X509Certificate
++import javax.net.ssl.HostnameVerifier
++import javax.net.ssl.SSLEngine
++import javax.net.ssl.SSLSocketFactory
++import javax.net.ssl.X509ExtendedKeyManager
++import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
++import okhttp3.OkHttpClient
++
++/** HTTPS and WSS share an identity; paths, credentials and fragments never enter the key. */
++internal fun certificateOrigin(url: String): String? {
++  val normalized = if (url.startsWith("wss://", true)) "https://" + url.substring(6) else url
++  val parsed =
++    normalized
++      .toHttpUrlOrNull()
++      ?.takeIf { it.scheme == "https" && it.username.isEmpty() && it.password.isEmpty() }
++      ?: return null
++  return parsed.newBuilder().encodedPath("/").query(null).fragment(null).build().toString()
++}
++
++internal class SelectedIdentity(
++  private val alias: String,
++  private val key: PrivateKey,
++  private val chain: Array<X509Certificate>
++) : X509ExtendedKeyManager() {
++  private fun accepts(types: Array<out String>?, issuers: Array<out Principal>?): Boolean {
++    val keyType = types?.any { it.substringBefore('_').equals(key.algorithm, true) } == true
++    return keyType && (issuers.isNullOrEmpty() || issuedBy(issuers))
++  }
++
++  private fun issuedBy(issuers: Array<out Principal>) =
++    chain.any { cert -> issuers.any { it == cert.issuerX500Principal } }
++
++  override fun chooseClientAlias(
++    types: Array<out String>?,
++    issuers: Array<out Principal>?,
++    socket: Socket?
++  ) = if (accepts(types, issuers)) alias else null
++
++  override fun chooseEngineClientAlias(
++    types: Array<out String>?,
++    issuers: Array<out Principal>?,
++    engine: SSLEngine?
++  ) = if (accepts(types, issuers)) alias else null
++
++  override fun getClientAliases(type: String?, issuers: Array<out Principal>?) =
++    if (type != null && accepts(arrayOf(type), issuers)) arrayOf(alias) else null
++
++  override fun getPrivateKey(requestedAlias: String?) =
++    if (requestedAlias == alias) key else null
++
++  override fun getCertificateChain(requestedAlias: String?) =
++    if (requestedAlias == alias) chain.clone() else null
++
++  override fun chooseServerAlias(
++    type: String?,
++    issuers: Array<out Principal>?,
++    socket: Socket?
++  ): String? = null
++
++  override fun getServerAliases(type: String?, issuers: Array<out Principal>?): Array<String>? =
++    null
++}
++
++/**
++ * Identity changes invalidate queued work even when the selected alias stays the same.
++ * Callers hold the transport lock while capturing, checking, or invalidating tokens.
++ */
++internal class CertificateGenerations {
++  private val tokens = mutableMapOf<String, Any>()
++
++  fun generation(origin: String): Any = tokens.getOrPut(origin) { Any() }
++
++  fun invalidate(origin: String) {
++    tokens.remove(origin)
++  }
++
++  fun invalidateAll() {
++    tokens.clear()
++  }
++}
++
++// OkHttp permits HTTP/2 connection coalescing across hosts only with its own verifier instance.
++// Delegating the same checks preserves HTTP/2 within an origin without sharing its client identity.
++internal val originHostnameVerifier: HostnameVerifier =
++  OkHttpClient().hostnameVerifier.let { verifier ->
++    HostnameVerifier { host, session -> verifier.verify(host, session) }
++  }
++
++/** Select using OkHttp's original hostname, never reverse DNS or the resolved IP address. */
++internal class OriginSocketFactory(
++  private val fallback: SSLSocketFactory,
++  private val factory: (String) -> SSLSocketFactory,
++  private val opened: (String, Socket) -> Unit,
++  private val lock: Any = Any(),
++  private val generation: (String) -> Any? = { null }
++) : SSLSocketFactory() {
++  override fun getDefaultCipherSuites(): Array<String> = fallback.defaultCipherSuites
++
++  override fun getSupportedCipherSuites(): Array<String> = fallback.supportedCipherSuites
++
++  override fun createSocket(socket: Socket, host: String, port: Int, autoClose: Boolean): Socket {
++    val authority = if (host.contains(':')) "[$host]" else host
++    val origin = requireNotNull(certificateOrigin("https://$authority:$port"))
++    val expectedGeneration = synchronized(lock) { generation(origin) }
++    // KeyChain may wait on another process. Neither other hosts nor certificate removal should
++    // wait for that work; reject its result if the identity changed while it was being resolved.
++    val selected = factory(origin)
++    return synchronized(lock) {
++      if (generation(origin) !== expectedGeneration) {
++        throw IOException("Certificate selection changed. Try again.")
++      }
++      selected.createSocket(socket, host, port, autoClose).also { opened(origin, it) }
++    }
++  }
++
++  // OkHttp uses the layered overload. Refuse ambiguous forms instead of guessing a destination.
++  override fun createSocket(host: String, port: Int): Socket =
++    throw UnsupportedOperationException("Layered TLS required")
++
++  override fun createSocket(
++    host: String,
++    port: Int,
++    local: InetAddress,
++    localPort: Int
++  ): Socket = throw UnsupportedOperationException("Layered TLS required")
++
++  override fun createSocket(host: InetAddress, port: Int): Socket =
++    throw UnsupportedOperationException("Hostname required")
++
++  override fun createSocket(
++    host: InetAddress,
++    port: Int,
++    local: InetAddress,
++    localPort: Int
++  ): Socket = throw UnsupportedOperationException("Hostname required")
++}
+diff --git a/apps/mobile/modules/t3-client-certificates/android/src/main/java/expo/modules/t3clientcertificates/T3CertificateTransport.kt b/apps/mobile/modules/t3-client-certificates/android/src/main/java/expo/modules/t3clientcertificates/T3CertificateTransport.kt
+new file mode 100644
+index 0000000000000000000000000000000000000000..394d0eb37932d228661214e4e2c627e735459f5e
+--- /dev/null
++++ b/apps/mobile/modules/t3-client-certificates/android/src/main/java/expo/modules/t3clientcertificates/T3CertificateTransport.kt
+@@ -0,0 +1,118 @@
++package expo.modules.t3clientcertificates
++
++import android.content.Context
++import android.security.KeyChain
++import com.facebook.react.modules.network.CustomClientBuilder
++import com.facebook.react.modules.network.NetworkingModule
++import com.facebook.react.modules.network.OkHttpClientFactory
++import com.facebook.react.modules.network.OkHttpClientProvider
++import com.facebook.react.modules.websocket.WebSocketModule
++import java.io.IOException
++import java.net.Socket
++import java.security.KeyStore
++import java.util.concurrent.ConcurrentHashMap
++import java.util.concurrent.TimeUnit
++import javax.net.ssl.SSLContext
++import javax.net.ssl.SSLSocketFactory
++import javax.net.ssl.TrustManagerFactory
++import javax.net.ssl.X509TrustManager
++import okhttp3.Call
++import okhttp3.OkHttpClient
++
++/**
++ * Process-wide transport, installed before React Native, Expo fetch, or Fresco creates a client.
++ */
++class T3CertificateTransport private constructor(private val context: Context) {
++  internal val lock = Any()
++  internal val preferences =
++    context.getSharedPreferences("t3-client-certificates", Context.MODE_PRIVATE)
++  internal val calls = ConcurrentHashMap<String, Call>()
++  internal val sockets = ConcurrentHashMap<Socket, String>()
++
++  // Accessed only under lock. Tokens distinguish remove/re-add and same-alias replacement.
++  private val generations = CertificateGenerations()
++  private val trust: X509TrustManager
++  private val defaultTls: SSLContext
++  private val socketFactory: SSLSocketFactory
++  internal val fileClient: OkHttpClient
++
++  init {
++    val trustFactory = TrustManagerFactory.getInstance(TrustManagerFactory.getDefaultAlgorithm())
++    trustFactory.init(null as KeyStore?)
++    trust = trustFactory.trustManagers.filterIsInstance<X509TrustManager>().single()
++    defaultTls = SSLContext.getInstance("TLS").apply { init(null, arrayOf(trust), null) }
++    socketFactory =
++      OriginSocketFactory(
++        defaultTls.socketFactory,
++        ::identityFactory,
++        { origin, socket ->
++          sockets.entries.removeIf { it.key.isClosed }
++          sockets[socket] = origin
++        },
++        lock,
++        ::generation
++      )
++    OkHttpClientProvider.setOkHttpClientFactory(
++      OkHttpClientFactory {
++        // Networking and Fresco must not open separate caches over the same directory.
++        configure(OkHttpClientProvider.createClientBuilder()).build()
++      }
++    )
++    val customize = CustomClientBuilder { builder -> configure(builder) }
++    NetworkingModule.setCustomClientBuilder(customize)
++    WebSocketModule.setCustomClientBuilder(customize)
++    fileClient =
++      configure(OkHttpClient.Builder())
++        .connectTimeout(30, TimeUnit.SECONDS)
++        .readTimeout(60, TimeUnit.SECONDS)
++        .followRedirects(false)
++        .followSslRedirects(false)
++        .build()
++  }
++
++  internal fun generation(origin: String): Any = generations.generation(origin)
++
++  internal fun invalidate(origin: String) {
++    generations.invalidate(origin)
++  }
++
++  internal fun invalidateAll() {
++    generations.invalidateAll()
++  }
++
++  @Suppress("TooGenericExceptionCaught") // Any KeyChain or TLS setup failure fails the connection.
++  private fun identityFactory(origin: String): SSLSocketFactory {
++    val alias = preferences.getString(origin, null) ?: return defaultTls.socketFactory
++    return try {
++      val key =
++        checkNotNull(KeyChain.getPrivateKey(context, alias)) {
++          "Client certificate is unavailable. Select it again in Connections."
++        }
++      val chain =
++        checkNotNull(KeyChain.getCertificateChain(context, alias)) {
++          "Client certificate chain is unavailable. Select it again in Connections."
++        }
++      chain.forEach { it.checkValidity() }
++      // Resolve the KeyChain grant on each new connection. No exported keys or TLS session
++      // resumption across a removed/replaced identity.
++      SSLContext
++        .getInstance("TLS")
++        .apply { init(arrayOf(SelectedIdentity(alias, key, chain)), arrayOf(trust), null) }
++        .socketFactory
++    } catch (error: Exception) {
++      throw IOException("Client certificate '$alias' could not be used: ${error.message}", error)
++    }
++  }
++
++  private fun configure(builder: OkHttpClient.Builder): OkHttpClient.Builder =
++    builder.sslSocketFactory(socketFactory, trust).hostnameVerifier(originHostnameVerifier)
++
++  companion object {
++    @Volatile private var instance: T3CertificateTransport? = null
++
++    @JvmStatic
++    @Synchronized
++    fun install(context: Context): T3CertificateTransport =
++      instance ?: T3CertificateTransport(context.applicationContext).also { instance = it }
++  }
++}
+diff --git a/apps/mobile/modules/t3-client-certificates/android/src/main/java/expo/modules/t3clientcertificates/T3ClientCertificatesModule.kt b/apps/mobile/modules/t3-client-certificates/android/src/main/java/expo/modules/t3clientcertificates/T3ClientCertificatesModule.kt
+new file mode 100644
+index 0000000000000000000000000000000000000000..cbd70a8271aed04f26ffa085de12a86edf577c76
+--- /dev/null
++++ b/apps/mobile/modules/t3-client-certificates/android/src/main/java/expo/modules/t3clientcertificates/T3ClientCertificatesModule.kt
+@@ -0,0 +1,324 @@
++package expo.modules.t3clientcertificates
++
++import android.app.Activity
++import android.content.BroadcastReceiver
++import android.content.Context
++import android.content.Intent
++import android.content.IntentFilter
++import android.net.Uri
++import android.os.Build
++import android.security.KeyChain
++import androidx.core.content.ContextCompat
++import expo.modules.kotlin.Promise
++import expo.modules.kotlin.modules.Module
++import expo.modules.kotlin.modules.ModuleDefinition
++import java.io.File
++import java.io.IOException
++import java.util.UUID
++import java.util.concurrent.ConcurrentHashMap
++import java.util.concurrent.Executors
++import java.util.concurrent.RejectedExecutionException
++import okhttp3.MediaType.Companion.toMediaTypeOrNull
++import okhttp3.Request
++import okhttp3.RequestBody
++import okhttp3.RequestBody.Companion.asRequestBody
++import okhttp3.Response
++import okio.Buffer
++import okio.BufferedSink
++import okio.ForwardingSink
++import okio.buffer
++
++class T3ClientCertificatesModule : Module() {
++  private data class Transfer(val url: String, val origin: String, val generation: Any)
++
++  private val io = Executors.newCachedThreadPool()
++  private lateinit var context: Context
++  private lateinit var transport: T3CertificateTransport
++  private val lock get() = transport.lock
++  private val preferences get() = transport.preferences
++  private val calls get() = transport.calls
++  private val sockets get() = transport.sockets
++  private val fileClient get() = transport.fileClient
++  private val transfers = ConcurrentHashMap<String, Transfer>()
++
++  @Volatile private var choosing = false
++  private var destroyed = false
++
++  private val keyChainChanges =
++    object : BroadcastReceiver() {
++      override fun onReceive(context: Context?, intent: Intent?) {
++        synchronized(lock) {
++          transport.invalidateAll()
++          sockets.keys.forEach { runCatching { it.close() } }
++          sockets.clear()
++          calls.values.forEach { it.cancel() }
++          fileClient.connectionPool.evictAll()
++        }
++        sendEvent("changed", mapOf("origin" to ""))
++      }
++    }
++
++  override fun definition() = ModuleDefinition {
++    Name("T3ClientCertificates")
++    Events("transferProgress", "changed")
++    OnCreate { create() }
++    Function("getAlias") { url: String ->
++      certificateOrigin(url)?.let { preferences.getString(it, null) }
++    }
++    AsyncFunction("choose") { url: String, promise: Promise -> choose(url, promise) }
++    AsyncFunction("remove") { url: String -> remove(url) }
++    // Register synchronously so cancellation cannot overtake the async transfer callback.
++    Function("createTransfer") { url: String -> createTransfer(url) }
++    Function("cancel") { id: String -> cancel(id) }
++    AsyncFunction("transfer") {
++        id: String,
++        fileUri: String,
++        upload: Boolean,
++        contentType: String,
++        promise: Promise
++      ->
++      execute(promise) { transfer(id, fileUri, upload, contentType, promise) }
++    }
++    OnDestroy { destroy() }
++  }
++
++  private fun create() {
++    context = requireNotNull(appContext.reactContext).applicationContext
++    transport = T3CertificateTransport.install(context)
++    context.cacheDir
++      .listFiles()
++      ?.filter { it.name.startsWith("t3-mtls-media-") }
++      ?.forEach { it.delete() }
++    val changes =
++      IntentFilter().apply {
++        addAction(KeyChain.ACTION_KEYCHAIN_CHANGED)
++        addAction(KeyChain.ACTION_KEY_ACCESS_CHANGED)
++        addAction(KeyChain.ACTION_TRUST_STORE_CHANGED)
++        if (Build.VERSION.SDK_INT < 26) addAction(KeyChain.ACTION_STORAGE_CHANGED)
++      }
++    ContextCompat.registerReceiver(
++      context,
++      keyChainChanges,
++      changes,
++      ContextCompat.RECEIVER_EXPORTED
++    )
++  }
++
++  private fun destroy() {
++    context.unregisterReceiver(keyChainChanges)
++    synchronized(lock) {
++      destroyed = true
++      transport.invalidateAll()
++      transfers.clear()
++      calls.values.forEach { it.cancel() }
++      sockets.keys.forEach { runCatching { it.close() } }
++    }
++    io.shutdown()
++  }
++
++  private fun choose(url: String, promise: Promise) {
++    val origin = certificateOrigin(url)
++    val activity = appContext.currentActivity
++    if (origin == null || activity == null) {
++      promise.reject(
++        "CERTIFICATE_PICKER",
++        "Enter an HTTPS host and open this screen in the foreground.",
++        null
++      )
++    } else if (choosing) {
++      promise.reject("CERTIFICATE_PICKER", "A certificate picker is already open.", null)
++    } else {
++      choosing = true
++      activity.runOnUiThread { showPicker(activity, origin, promise) }
++    }
++  }
++
++  @Suppress("TooGenericExceptionCaught") // Every failure must settle the JS promise.
++  private fun showPicker(activity: Activity, origin: String, promise: Promise) {
++    try {
++      val uri = Uri.parse(origin)
++      KeyChain.choosePrivateKeyAlias(
++        activity,
++        { alias -> execute(promise) { saveChoice(origin, alias, promise) } },
++        null,
++        null,
++        uri.host,
++        if (uri.port == -1) 443 else uri.port,
++        preferences.getString(origin, null)
++      )
++    } catch (error: Exception) {
++      choosing = false
++      promise.reject("CERTIFICATE_PICKER", error.message, error)
++    }
++  }
++
++  @Suppress("TooGenericExceptionCaught") // Every failure must settle the JS promise.
++  private fun saveChoice(origin: String, alias: String?, promise: Promise) {
++    try {
++      if (alias != null) {
++        requireNotNull(KeyChain.getPrivateKey(context, alias)) { "Private key unavailable" }
++        val chain =
++          requireNotNull(KeyChain.getCertificateChain(context, alias)) {
++            "Certificate unavailable"
++          }
++        chain.forEach { it.checkValidity() }
++        synchronized(lock) {
++          check(!destroyed) { "Certificate operation cancelled because the app closed." }
++          check(preferences.edit().putString(origin, alias).commit()) {
++            "Could not save certificate choice"
++          }
++          retire(origin)
++        }
++        sendEvent("changed", mapOf("origin" to origin))
++      }
++      promise.resolve(alias)
++    } catch (error: Exception) {
++      promise.reject("CERTIFICATE_UNAVAILABLE", error.message, error)
++    } finally {
++      choosing = false
++    }
++  }
++
++  private fun remove(url: String) {
++    val origin = requireNotNull(certificateOrigin(url)) { "HTTPS host required" }
++    synchronized(lock) {
++      check(preferences.edit().remove(origin).commit()) { "Could not remove certificate choice" }
++      retire(origin)
++    }
++    sendEvent("changed", mapOf("origin" to origin))
++  }
++
++  private fun createTransfer(url: String): String {
++    val origin = requireNotNull(certificateOrigin(url)) { "HTTPS URL required" }
++    return synchronized(lock) {
++      check(preferences.contains(origin)) { "No client certificate selected for this host" }
++      UUID.randomUUID().toString().also { id ->
++        transfers[id] = Transfer(url, origin, transport.generation(origin))
++      }
++    }
++  }
++
++  private fun cancel(id: String) {
++    synchronized(lock) {
++      transfers.remove(id)
++      calls[id]?.cancel()
++    }
++  }
++
++  @Suppress("TooGenericExceptionCaught") // Every failure must settle the JS promise.
++  private fun transfer(
++    id: String,
++    fileUri: String,
++    upload: Boolean,
++    contentType: String,
++    promise: Promise
++  ) {
++    var file: File? = null
++    try {
++      val transfer = transfers[id] ?: throw IOException("Transfer cancelled")
++      val target = appOwnedFile(fileUri)
++      file = target
++      val request = Request.Builder().url(transfer.url)
++      if (upload) request.post(progressBody(id, target, contentType))
++      val call =
++        synchronized(lock) {
++          check(preferences.contains(transfer.origin)) {
++            "Certificate selection changed. Try again."
++          }
++          check(transfers[id] === transfer) { "Transfer cancelled" }
++          check(transport.generation(transfer.origin) === transfer.generation) {
++            "Certificate selection changed. Try again."
++          }
++          fileClient.newCall(request.build()).also { calls[id] = it }
++        }
++      call.execute().use { response ->
++        if (!upload) saveDownload(response, target)
++        if (call.isCanceled()) throw IOException("Transfer cancelled")
++        promise.resolve(mapOf("status" to response.code))
++      }
++    } catch (error: Exception) {
++      if (!upload) file?.delete()
++      promise.reject("CERTIFICATE_TRANSFER", error.message, error)
++    } finally {
++      calls.remove(id)
++      transfers.remove(id)
++    }
++  }
++
++  private fun saveDownload(response: Response, target: File) {
++    if (!response.isSuccessful) throw IOException("Download returned HTTP ${response.code}")
++    val body = response.body ?: throw IOException("Empty download response")
++    target.outputStream().use { output -> body.byteStream().use { it.copyTo(output) } }
++  }
++
++  private fun appOwnedFile(fileUri: String): File {
++    val uri = Uri.parse(fileUri)
++    require(uri.scheme == "file") { "An app-owned file is required" }
++    val target = File(requireNotNull(uri.path)).canonicalFile
++    val roots = listOf(context.filesDir.canonicalFile, context.cacheDir.canonicalFile)
++    require(roots.any { target.path.startsWith(it.path + File.separator) }) {
++      "File must be inside app storage"
++    }
++    return target
++  }
++
++  private fun progressBody(id: String, file: File, contentType: String): RequestBody {
++    val body = file.asRequestBody(contentType.toMediaTypeOrNull())
++    return object : RequestBody() {
++      override fun contentType() = body.contentType()
++
++      override fun contentLength() = body.contentLength()
++
++      override fun writeTo(sink: BufferedSink) {
++        val total = contentLength()
++        var sent = 0L
++        var last = 0L
++        val forwarding =
++          object : ForwardingSink(sink) {
++            override fun write(source: Buffer, byteCount: Long) {
++              super.write(source, byteCount)
++              sent += byteCount
++              val now = System.nanoTime()
++              if (sent == total || now - last > 100_000_000L) {
++                last = now
++                sendEvent(
++                  "transferProgress",
++                  mapOf("id" to id, "bytesSent" to sent, "totalBytes" to total)
++                )
++              }
++            }
++          }
++        val buffered = forwarding.buffer()
++        body.writeTo(buffered)
++        buffered.flush()
++      }
++    }
++  }
++
++  private fun execute(promise: Promise, block: () -> Unit) {
++    try {
++      io.execute(block)
++    } catch (error: RejectedExecutionException) {
++      choosing = false
++      promise.reject(
++        "CERTIFICATE_CANCELLED",
++        "Certificate operation cancelled because the app closed.",
++        error
++      )
++    }
++  }
++
++  private fun retire(origin: String) {
++    transport.invalidate(origin)
++    calls.values
++      .filter { certificateOrigin(it.request().url.toString()) == origin }
++      .forEach { it.cancel() }
++    sockets.entries
++      .filter { it.value == origin }
++      .forEach {
++        runCatching { it.key.close() }
++        sockets.remove(it.key)
++      }
++    fileClient.connectionPool.evictAll()
++  }
++}
+diff --git a/apps/mobile/modules/t3-client-certificates/android/src/test/java/expo/modules/t3clientcertificates/CertificateTlsTest.kt b/apps/mobile/modules/t3-client-certificates/android/src/test/java/expo/modules/t3clientcertificates/CertificateTlsTest.kt
+new file mode 100644
+index 0000000000000000000000000000000000000000..d1b821feefa19b843de74f957ba717451214e6b1
+--- /dev/null
++++ b/apps/mobile/modules/t3-client-certificates/android/src/test/java/expo/modules/t3clientcertificates/CertificateTlsTest.kt
+@@ -0,0 +1,561 @@
++package expo.modules.t3clientcertificates
++
++import java.io.IOException
++import java.net.InetAddress
++import java.net.Socket
++import java.util.concurrent.CountDownLatch
++import java.util.concurrent.ExecutionException
++import java.util.concurrent.Executors
++import java.util.concurrent.TimeUnit
++import javax.net.ssl.SSLContext
++import javax.net.ssl.SSLHandshakeException
++import javax.net.ssl.SSLPeerUnverifiedException
++import javax.security.auth.x500.X500Principal
++import okhttp3.ConnectionSpec
++import okhttp3.Dns
++import okhttp3.OkHttpClient
++import okhttp3.Protocol
++import okhttp3.Request
++import okhttp3.RequestBody.Companion.toRequestBody
++import okhttp3.Response
++import okhttp3.TlsVersion
++import okhttp3.WebSocket
++import okhttp3.WebSocketListener
++import okhttp3.mockwebserver.MockResponse
++import okhttp3.mockwebserver.MockWebServer
++import okhttp3.tls.HandshakeCertificates
++import okhttp3.tls.HeldCertificate
++import org.junit.Assert.assertArrayEquals
++import org.junit.Assert.assertEquals
++import org.junit.Assert.assertNotEquals
++import org.junit.Assert.assertNotSame
++import org.junit.Assert.assertNull
++import org.junit.Assert.assertSame
++import org.junit.Assert.assertTrue
++import org.junit.Assert.fail
++import org.junit.Test
++
++class CertificateTlsTest {
++  private val ca = HeldCertificate.Builder().certificateAuthority(1).commonName("test CA").build()
++  private val serverIdentity =
++    HeldCertificate
++      .Builder()
++      .commonName("localhost")
++      .addSubjectAlternativeName("localhost")
++      .addSubjectAlternativeName("t3.test")
++      .signedBy(ca)
++      .build()
++  private val phone = HeldCertificate.Builder().commonName("phone").signedBy(ca).build()
++  private val serverTls =
++    HandshakeCertificates
++      .Builder()
++      .heldCertificate(serverIdentity, ca.certificate)
++      .addTrustedCertificate(ca.certificate)
++      .build()
++  private val clientTrust =
++    HandshakeCertificates.Builder().addTrustedCertificate(ca.certificate).build()
++
++  // A second hostname for the same local server, so tests can cross hosts without leaving it.
++  private val testDns =
++    object : Dns {
++      override fun lookup(hostname: String): List<InetAddress> =
++        if (hostname == "t3.test") {
++          listOf(InetAddress.getByName("127.0.0.1"))
++        } else {
++          Dns.SYSTEM.lookup(hostname)
++        }
++    }
++
++  private fun server(required: Boolean = true) = MockWebServer().apply {
++    useHttps(serverTls.sslSocketFactory(), false)
++    if (required) requireClientAuth() else requestClientAuth()
++    protocols = listOf(Protocol.HTTP_1_1)
++    start()
++  }
++
++  private fun identityTls(identity: HeldCertificate): SSLContext =
++    SSLContext.getInstance("TLS").apply {
++      val selected =
++        SelectedIdentity(
++          "phone",
++          identity.keyPair.private,
++          arrayOf(identity.certificate, ca.certificate)
++        )
++      init(arrayOf(selected), arrayOf(clientTrust.trustManager), null)
++    }
++
++  private fun client(
++    origins: Set<String>,
++    identity: HeldCertificate = phone,
++    tlsVersion: TlsVersion? = null,
++    opened: (String, Socket) -> Unit = { _, _ -> }
++  ): OkHttpClient {
++    val tls = identityTls(identity)
++    val socketFactory =
++      OriginSocketFactory(
++        clientTrust.sslSocketFactory(),
++        { origin -> if (origin in origins) tls.socketFactory else clientTrust.sslSocketFactory() },
++        opened
++      )
++    return OkHttpClient
++      .Builder()
++      .sslSocketFactory(socketFactory, clientTrust.trustManager)
++      .hostnameVerifier(originHostnameVerifier)
++      .apply {
++        if (tlsVersion != null) {
++          val spec =
++            ConnectionSpec.Builder(ConnectionSpec.MODERN_TLS).tlsVersions(tlsVersion).build()
++          connectionSpecs(listOf(spec))
++        }
++      }.callTimeout(5, TimeUnit.SECONDS)
++      .build()
++  }
++
++  private fun assertAuthenticates(identity: HeldCertificate, version: TlsVersion) {
++    val server = server()
++    val client = client(setOf(certificateOrigin(server.url("/").toString())!!), identity, version)
++    try {
++      server.enqueue(MockResponse().setBody("authenticated"))
++      client.newCall(Request.Builder().url(server.url("/")).build()).execute().use {
++        assertEquals("${identity.keyPair.private.algorithm} $version", 200, it.code)
++        assertEquals(version, it.handshake!!.tlsVersion)
++      }
++      assertEquals(
++        identity.certificate,
++        server.takeRequest(2, TimeUnit.SECONDS)!!.handshake!!.peerCertificates.first()
++      )
++    } finally {
++      client.connectionPool.evictAll()
++      server.shutdown()
++    }
++  }
++
++  @Test fun originNormalizationRejectsCleartextAndUserInfo() {
++    assertEquals(
++      "https://example.com/",
++      certificateOrigin("https://EXAMPLE.com:443/path?token=secret#fragment")
++    )
++    assertEquals("https://example.com:8443/", certificateOrigin("wss://example.com:8443/ws"))
++    assertEquals("https://[::1]:8443/", certificateOrigin("https://[::1]:8443/a"))
++    assertNull(certificateOrigin("http://example.com"))
++    assertNull(certificateOrigin("ws://example.com"))
++    assertNull(certificateOrigin("https://user:pass@example.com"))
++    assertNull(certificateOrigin("not a URL"))
++  }
++
++  @Test fun selectedIdentityHonorsRequestedKeyAndIssuer() {
++    val identity =
++      SelectedIdentity("phone", phone.keyPair.private, arrayOf(phone.certificate, ca.certificate))
++    val algorithm = phone.keyPair.private.algorithm
++    assertEquals(
++      "phone",
++      identity.chooseClientAlias(
++        arrayOf(algorithm),
++        arrayOf(ca.certificate.subjectX500Principal),
++        null
++      )
++    )
++    assertNull(identity.chooseClientAlias(arrayOf("UNSUPPORTED"), null, null))
++    assertNull(
++      identity.chooseClientAlias(arrayOf(algorithm), arrayOf(X500Principal("CN=other")), null)
++    )
++    assertNull(identity.getPrivateKey("other"))
++    assertNull(identity.chooseServerAlias(algorithm, null, null))
++  }
++
++  @Test fun descriptorAndFileRoundTripUseCertificate() {
++    val server = server()
++    try {
++      val client = client(setOf(certificateOrigin(server.url("/").toString())!!))
++      server.enqueue(MockResponse().setBody("{\"environmentId\":\"test\"}"))
++      server.enqueue(MockResponse().setBody("uploaded"))
++      server.enqueue(MockResponse().setBody("attachment bytes"))
++      val descriptor = Request.Builder().url(server.url("/.well-known/t3/environment")).build()
++      client.newCall(descriptor).execute().use { assertEquals(200, it.code) }
++      val upload =
++        Request
++          .Builder()
++          .url(server.url("/upload"))
++          .post("attachment bytes".toRequestBody())
++          .build()
++      client.newCall(upload).execute().close()
++      client.newCall(Request.Builder().url(server.url("/download")).build()).execute().use {
++        assertEquals("attachment bytes", it.body!!.string())
++      }
++      repeat(3) { index ->
++        val request = server.takeRequest(2, TimeUnit.SECONDS)!!
++        assertEquals(phone.certificate, request.handshake!!.peerCertificates.first())
++        if (index == 1) assertEquals("attachment bytes", request.body.readUtf8())
++      }
++      client.connectionPool.evictAll()
++    } finally {
++      server.shutdown()
++    }
++  }
++
++  @Test fun websocketStreamsWithTheSameIdentity() {
++    val server = server()
++    try {
++      server.enqueue(
++        MockResponse().withWebSocketUpgrade(
++          object : WebSocketListener() {
++            override fun onMessage(webSocket: WebSocket, text: String) {
++              webSocket.send("stream:$text")
++            }
++          }
++        )
++      )
++      val received = CountDownLatch(1)
++      var message: String? = null
++      val client = client(setOf(certificateOrigin(server.url("/").toString())!!))
++      val socket =
++        client.newWebSocket(
++          Request.Builder().url(server.url("/ws")).build(),
++          object : WebSocketListener() {
++            override fun onOpen(webSocket: WebSocket, response: Response) {
++              webSocket.send("hello")
++            }
++
++            override fun onMessage(webSocket: WebSocket, text: String) {
++              message = text
++              received.countDown()
++            }
++          }
++        )
++      assertTrue(received.await(5, TimeUnit.SECONDS))
++      assertEquals("stream:hello", message)
++      assertEquals(
++        phone.certificate,
++        server.takeRequest(2, TimeUnit.SECONDS)!!.handshake!!.peerCertificates.first()
++      )
++      socket.cancel()
++      client.dispatcher.executorService.shutdown()
++      client.connectionPool.evictAll()
++    } finally {
++      server.shutdown()
++    }
++  }
++
++  @Test fun redirectToAnotherPortDoesNotReceiveTheCertificate() {
++    val authenticated = server()
++    val other = server(false)
++    try {
++      authenticated.enqueue(
++        MockResponse().setResponseCode(302).addHeader("Location", other.url("/redirect-target"))
++      )
++      other.enqueue(MockResponse().setBody("anonymous"))
++      val client = client(setOf(certificateOrigin(authenticated.url("/").toString())!!))
++      client.newCall(Request.Builder().url(authenticated.url("/redirect")).build()).execute().use {
++        assertEquals("anonymous", it.body!!.string())
++      }
++      assertEquals(
++        phone.certificate,
++        authenticated.takeRequest(2, TimeUnit.SECONDS)!!.handshake!!.peerCertificates.first()
++      )
++      assertTrue(other.takeRequest(2, TimeUnit.SECONDS)!!.handshake!!.peerCertificates.isEmpty())
++      client.connectionPool.evictAll()
++    } finally {
++      authenticated.shutdown()
++      other.shutdown()
++    }
++  }
++
++  @Test fun missingIdentityFailsRequiredClientAuthentication() {
++    val server = server()
++    try {
++      val client = client(emptySet())
++      try {
++        client.newCall(Request.Builder().url(server.url("/")).build()).execute().use {
++          fail("mTLS must fail without identity")
++        }
++      } catch (_: IOException) {
++        // Expected: the server rejects the handshake.
++      }
++      client.connectionPool.evictAll()
++    } finally {
++      server.shutdown()
++    }
++  }
++
++  @Test fun serverHostnameVerificationIsPreserved() {
++    val server = server()
++    try {
++      val wrongHost = server.url("/").newBuilder().host("127.0.0.1").build()
++      val client = client(setOf(certificateOrigin(wrongHost.toString())!!))
++      try {
++        client.newCall(Request.Builder().url(wrongHost).build()).execute().use {
++          fail("Wrong server hostname must be rejected")
++        }
++      } catch (_: SSLPeerUnverifiedException) {
++        // Expected: the server certificate does not name this host.
++      }
++      client.connectionPool.evictAll()
++    } finally {
++      server.shutdown()
++    }
++  }
++
++  @Test fun removingIdentityAndClosingItsSocketsPreventsAuthenticatedReuse() {
++    val server = server()
++    try {
++      val origins = mutableSetOf(certificateOrigin(server.url("/").toString())!!)
++      val sockets = mutableListOf<Socket>()
++      val client = client(origins) { _, socket -> sockets.add(socket) }
++      server.enqueue(MockResponse().setBody("authenticated"))
++      client.newCall(Request.Builder().url(server.url("/")).build()).execute().use {
++        assertEquals(200, it.code)
++      }
++      origins.clear()
++      sockets.forEach { it.close() }
++      try {
++        client.newCall(Request.Builder().url(server.url("/")).build()).execute().use {
++          fail("Old authenticated socket must not be reused")
++        }
++      } catch (_: IOException) {
++        // Expected: the required client identity was removed.
++      }
++      client.connectionPool.evictAll()
++    } finally {
++      server.shutdown()
++    }
++  }
++
++  @Test fun rsaAndEcIdentitiesAuthenticateWithTls12AndTls13() {
++    val rsa = HeldCertificate.Builder().rsa2048().commonName("RSA phone").signedBy(ca).build()
++    for (identity in listOf(phone, rsa)) {
++      for (version in listOf(TlsVersion.TLS_1_2, TlsVersion.TLS_1_3)) {
++        assertAuthenticates(identity, version)
++      }
++    }
++  }
++
++  @Test fun intermediateChainMatchesEitherAcceptedIssuer() {
++    val intermediate =
++      HeldCertificate
++        .Builder()
++        .certificateAuthority(0)
++        .commonName("intermediate CA")
++        .signedBy(ca)
++        .build()
++    val leaf =
++      HeldCertificate.Builder().commonName("phone via intermediate").signedBy(intermediate).build()
++    val chain = arrayOf(leaf.certificate, intermediate.certificate)
++    val identity = SelectedIdentity("phone", leaf.keyPair.private, chain)
++    for (issuer in listOf(ca.certificate, intermediate.certificate)) {
++      assertEquals(
++        "phone",
++        identity.chooseClientAlias(
++          arrayOf(leaf.keyPair.private.algorithm),
++          arrayOf(issuer.subjectX500Principal),
++          null
++        )
++      )
++    }
++    // Android may omit the root from the returned chain; the intermediate's issuer still matches.
++    assertArrayEquals(chain, identity.getCertificateChain("phone"))
++    val returned = identity.getCertificateChain("phone")!!
++    returned[0] = ca.certificate
++    assertEquals(leaf.certificate, identity.getCertificateChain("phone")!![0])
++  }
++
++  @Test fun redirectToAnotherHostnameOnTheSameServerDoesNotReceiveTheCertificate() {
++    val server = server(false)
++    val origin = certificateOrigin(server.url("/").toString())!!
++    val client = client(setOf(origin)).newBuilder().dns(testDns).build()
++    try {
++      val destination = server.url("/other-host").newBuilder().host("t3.test").build()
++      server.enqueue(MockResponse().setResponseCode(302).addHeader("Location", destination))
++      server.enqueue(MockResponse().setBody("anonymous"))
++      client.newCall(Request.Builder().url(server.url("/redirect")).build()).execute().use {
++        assertEquals("anonymous", it.body!!.string())
++      }
++      assertEquals(
++        phone.certificate,
++        server.takeRequest(2, TimeUnit.SECONDS)!!.handshake!!.peerCertificates.first()
++      )
++      assertTrue(server.takeRequest(2, TimeUnit.SECONDS)!!.handshake!!.peerCertificates.isEmpty())
++    } finally {
++      client.connectionPool.evictAll()
++      server.shutdown()
++    }
++  }
++
++  @Test fun selectedClientIdentityDoesNotTrustAnUnrecognizedServerCa() {
++    val untrusted =
++      HeldCertificate
++        .Builder()
++        .commonName("localhost")
++        .addSubjectAlternativeName("localhost")
++        .build()
++    val untrustedTls =
++      HandshakeCertificates
++        .Builder()
++        .heldCertificate(untrusted)
++        .addTrustedCertificate(ca.certificate)
++        .build()
++    val server = MockWebServer().apply {
++      useHttps(untrustedTls.sslSocketFactory(), false)
++      requireClientAuth()
++      start()
++    }
++    val client = client(setOf(certificateOrigin(server.url("/").toString())!!))
++    try {
++      client.newCall(Request.Builder().url(server.url("/")).build()).execute().use {
++        fail("Selecting a client certificate must not bypass server trust")
++      }
++    } catch (_: SSLHandshakeException) {
++      // Expected: a client identity cannot grant trust to an unrelated server certificate.
++    } finally {
++      client.connectionPool.evictAll()
++      server.shutdown()
++    }
++  }
++
++  @Test fun http2ReusesConnectionsWithinAnOriginWithoutSharingIdentitiesAcrossHosts() {
++    val server = server().apply { protocols = listOf(Protocol.HTTP_2, Protocol.HTTP_1_1) }
++    val secondPhone = HeldCertificate.Builder().commonName("second phone").signedBy(ca).build()
++    val firstUrl = server.url("/")
++    val secondUrl = firstUrl.newBuilder().host("t3.test").build()
++    val identities =
++      mapOf(
++        certificateOrigin(firstUrl.toString())!! to phone,
++        certificateOrigin(secondUrl.toString())!! to secondPhone
++      )
++    val socketFactory =
++      OriginSocketFactory(
++        clientTrust.sslSocketFactory(),
++        { origin -> identityTls(identities.getValue(origin)).socketFactory },
++        { _, _ -> }
++      )
++    val client =
++      OkHttpClient
++        .Builder()
++        .sslSocketFactory(socketFactory, clientTrust.trustManager)
++        .hostnameVerifier(originHostnameVerifier)
++        .dns(testDns)
++        .callTimeout(5, TimeUnit.SECONDS)
++        .build()
++    try {
++      val destinations = listOf(firstUrl to phone, secondUrl to secondPhone, firstUrl to phone)
++      for ((index, destination) in destinations.withIndex()) {
++        val (url, identity) = destination
++        server.enqueue(MockResponse().setBody("authenticated"))
++        client.newCall(Request.Builder().url(url).build()).execute().use {
++          assertEquals(200, it.code)
++          assertEquals(Protocol.HTTP_2, it.protocol)
++          assertEquals("authenticated", it.body!!.string())
++        }
++        val received = server.takeRequest(2, TimeUnit.SECONDS)!!
++        assertEquals(identity.certificate, received.handshake!!.peerCertificates.first())
++        assertEquals(if (index == 2) 1 else 0, received.sequenceNumber)
++      }
++    } finally {
++      client.connectionPool.evictAll()
++      server.shutdown()
++    }
++  }
++
++  @Test fun changingIdentityInvalidatesQueuedWorkOnlyForThatOrigin() {
++    val generations = CertificateGenerations()
++    val origin = "https://first.test/"
++    val otherOrigin = "https://second.test/"
++    val pendingFirst = generations.generation(origin)
++    val pendingOther = generations.generation(otherOrigin)
++
++    // A transfer queued with certificate A must not register after switching to B.
++    generations.invalidate(origin)
++    assertNotSame(pendingFirst, generations.generation(origin))
++    assertSame(pendingOther, generations.generation(otherOrigin))
++    // Requests captured after the switch remain valid until another identity change.
++    val pendingAfterSwitch = generations.generation(origin)
++    assertSame(pendingAfterSwitch, generations.generation(origin))
++  }
++
++  @Test fun removingAndReaddingTheSameAliasCannotReviveQueuedWork() {
++    val generations = CertificateGenerations()
++    val origin = "https://first.test/"
++    val beforeRemoval = generations.generation(origin)
++    generations.invalidate(origin)
++    val whileRemoved = generations.generation(origin)
++    // Re-selecting the same alias (or replacing its underlying key) is still a new identity grant.
++    generations.invalidate(origin)
++    val afterReadding = generations.generation(origin)
++    assertNotSame(beforeRemoval, afterReadding)
++    assertNotSame(whileRemoved, afterReadding)
++  }
++
++  @Test fun keyChainChangesInvalidateEveryQueuedOrigin() {
++    val generations = CertificateGenerations()
++    val origins = listOf("https://first.test/", "https://first.test:8443/", "https://second.test/")
++    val pending = origins.associateWith { generations.generation(it) }
++    generations.invalidateAll()
++    for (origin in origins) {
++      assertNotSame(pending.getValue(origin), generations.generation(origin))
++    }
++  }
++
++  @Test fun slowIdentityResolutionDoesNotBlockOtherHostsOrReviveARemovedChoice() {
++    val lock = Any()
++    val generations = CertificateGenerations()
++    val resolving = CountDownLatch(1)
++    val release = CountDownLatch(1)
++    val executor = Executors.newSingleThreadExecutor()
++    val server = server(false)
++    val blockedOrigin = certificateOrigin(server.url("/").toString())!!
++    val factory =
++      OriginSocketFactory(
++        clientTrust.sslSocketFactory(),
++        { origin ->
++          if (origin == blockedOrigin) {
++            resolving.countDown()
++            check(release.await(5, TimeUnit.SECONDS)) { "Identity resolution was not released" }
++          }
++          clientTrust.sslSocketFactory()
++        },
++        { origin, _ ->
++          assertNotEquals("A removed identity must never register a socket", blockedOrigin, origin)
++        },
++        lock,
++        generations::generation
++      )
++    val client =
++      OkHttpClient
++        .Builder()
++        .sslSocketFactory(factory, clientTrust.trustManager)
++        .hostnameVerifier(originHostnameVerifier)
++        .dns(
++          object : Dns {
++            override fun lookup(hostname: String) = listOf(InetAddress.getByName("127.0.0.1"))
++          }
++        ).retryOnConnectionFailure(false)
++        .callTimeout(5, TimeUnit.SECONDS)
++        .build()
++    try {
++      val pending =
++        executor.submit<Unit> {
++          client.newCall(Request.Builder().url(server.url("/")).build()).execute().close()
++        }
++      assertTrue(resolving.await(5, TimeUnit.SECONDS))
++      server.enqueue(MockResponse().setBody("other host"))
++      val otherHost = server.url("/").newBuilder().host("t3.test").build()
++      client.newCall(Request.Builder().url(otherHost).build()).execute().use {
++        assertEquals("other host", it.body!!.string())
++      }
++      synchronized(lock) { generations.invalidate(blockedOrigin) }
++      release.countDown()
++      try {
++        pending.get(5, TimeUnit.SECONDS)
++        fail("The request must reject the removed identity")
++      } catch (error: ExecutionException) {
++        assertTrue(error.cause is IOException)
++        assertEquals("Certificate selection changed. Try again.", error.cause!!.message)
++      }
++      assertEquals(1, server.requestCount)
++    } finally {
++      release.countDown()
++      executor.shutdownNow()
++      client.connectionPool.evictAll()
++      server.shutdown()
++    }
++  }
++}
+diff --git a/apps/mobile/modules/t3-client-certificates/expo-module.config.json b/apps/mobile/modules/t3-client-certificates/expo-module.config.json
+new file mode 100644
+index 0000000000000000000000000000000000000000..ca50e51cde1da9a0969db50bd0142893aebb2e26
+--- /dev/null
++++ b/apps/mobile/modules/t3-client-certificates/expo-module.config.json
+@@ -0,0 +1,4 @@
++{
++  "platforms": ["android"],
++  "android": { "modules": ["expo.modules.t3clientcertificates.T3ClientCertificatesModule"] }
++}
+diff --git a/apps/mobile/plugins/withAndroidClientCertificates.cjs b/apps/mobile/plugins/withAndroidClientCertificates.cjs
+new file mode 100644
+index 0000000000000000000000000000000000000000..bc3fc2511cb605970b4c8b728351114e1d80a881
+--- /dev/null
++++ b/apps/mobile/plugins/withAndroidClientCertificates.cjs
+@@ -0,0 +1,33 @@
++const { withMainApplication } = require("expo/config-plugins");
++
++const install = "expo.modules.t3clientcertificates.T3CertificateTransport.install(this)";
++
++function installCertificateTransport(source) {
++  // Anchor to the method body, not a comment or another lifecycle method. Fail closed if
++  // a future Expo template runs initialization before super.onCreate(). These hooks must
++  // precede every eagerly created Expo fetch / Fresco client.
++  const marker = /override fun onCreate\(\)\s*\{\s*super\.onCreate\(\)[ \t]*;?/g;
++  const matches = [...source.matchAll(marker)];
++  if (matches.length !== 1)
++    throw new Error("Cannot install client certificates before React Native startup");
++  const match = matches[0];
++  const offset = match.index + match[0].length;
++  if (source.includes(install)) {
++    if (!source.slice(offset).trimStart().startsWith(install) || source.split(install).length !== 2)
++      throw new Error(
++        "Client certificate transport must be installed immediately after super.onCreate()",
++      );
++    return source;
++  }
++  const newline = source.includes("\r\n") ? "\r\n" : "\n";
++  return source.slice(0, offset) + `${newline}    ${install}` + source.slice(offset);
++}
++
++module.exports = (config) =>
++  withMainApplication(config, (next) => {
++    if (next.modResults.language !== "kt")
++      throw new Error("Client certificate startup requires Kotlin MainApplication");
++    next.modResults.contents = installCertificateTransport(next.modResults.contents);
++    return next;
++  });
++module.exports.installCertificateTransport = installCertificateTransport;
+diff --git a/apps/mobile/plugins/withAndroidClientCertificates.test.ts b/apps/mobile/plugins/withAndroidClientCertificates.test.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..f9cf77d07b2ea722024048397165c3a9d875f113
+--- /dev/null
++++ b/apps/mobile/plugins/withAndroidClientCertificates.test.ts
+@@ -0,0 +1,60 @@
++import * as NodeModule from "node:module";
++import { describe, expect, it } from "vite-plus/test";
++
++const require = NodeModule.createRequire(import.meta.url);
++const { installCertificateTransport } = require("./withAndroidClientCertificates.cjs") as {
++  installCertificateTransport(source: string): string;
++};
++const install = "expo.modules.t3clientcertificates.T3CertificateTransport.install(this)";
++const template = `class MainApplication : Application(), ReactApplication {
++  override fun onCreate() {
++    super.onCreate()
++    loadReactNative(this)
++    ApplicationLifecycleDispatcher.onApplicationCreate(this)
++  }
++}`;
++
++describe("Android certificate startup prebuild", () => {
++  it("installs before React Native and Expo lifecycle initialize their HTTP clients", () => {
++    expect(installCertificateTransport(template)).toBe(
++      template.replace("super.onCreate()", `super.onCreate()\n    ${install}`),
++    );
++  });
++
++  it("is idempotent across repeated prebuilds", () => {
++    const generated = installCertificateTransport(template);
++    expect(installCertificateTransport(generated)).toBe(generated);
++  });
++
++  it("preserves Windows line endings", () => {
++    const generated = installCertificateTransport(template.replaceAll("\n", "\r\n"));
++    expect(generated).toContain(`super.onCreate()\r\n    ${install}\r\n`);
++    expect(installCertificateTransport(generated)).toBe(generated);
++  });
++
++  it("ignores super.onCreate references outside the lifecycle body", () => {
++    const prefix = "// super.onCreate() is required by Android\n";
++    expect(installCertificateTransport(prefix + template)).toBe(
++      prefix + installCertificateTransport(template),
++    );
++  });
++
++  it.each([
++    "class MainApplication {}",
++    template.replace("super.onCreate()", "initializeNetworking()\n    super.onCreate()"),
++    template + template,
++  ])("rejects an incompatible startup template instead of silently missing hooks", (source) => {
++    expect(() => installCertificateTransport(source)).toThrow(
++      "Cannot install client certificates before React Native startup",
++    );
++  });
++
++  it.each([
++    template.replace("loadReactNative(this)", `loadReactNative(this)\n    ${install}`),
++    template.replace("super.onCreate()", `super.onCreate()\n    ${install}\n    ${install}`),
++  ])("rejects a misplaced or duplicated existing install", (source) => {
++    expect(() => installCertificateTransport(source)).toThrow(
++      "Client certificate transport must be installed immediately after super.onCreate()",
++    );
++  });
++});
+diff --git a/apps/mobile/src/components/MediaVideoPlayer.tsx b/apps/mobile/src/components/MediaVideoPlayer.tsx
+index d0c85634368fd5349ced105644135e9c64078450..e66b88a30a5e3d02fecfeb5a8a3d61b3de5852b6 100644
+--- a/apps/mobile/src/components/MediaVideoPlayer.tsx
++++ b/apps/mobile/src/components/MediaVideoPlayer.tsx
+@@ -16,6 +16,7 @@ import { type MediaActionsSource } from "../lib/mediaActionsSource";
+ import { useMediaVideoPlayback } from "../lib/useMediaVideoPlayback";
+ import { MediaActionsMenu } from "./MediaActionsMenu";
+ import { createAudioPlaybackSession } from "../lib/audioSession";
++import { loadCertificateMedia } from "../lib/certificateMedia";
+ 
+ function LoadedMediaVideo(props: {
+   readonly uri: string;
+@@ -69,6 +70,7 @@ function LoadedMediaVideo(props: {
+     };
+   }, [active, fullscreen, player, playback]);
+   const { status } = useEvent(player, "statusChange", { status: player.status });
++  const mediaLease = useRef<(() => void) | null>(null);
+   const loadSource = useEffectEvent(async (signal: AbortSignal) => {
+     const playIfUninterrupted = createPlayRequest();
+     const uri = props.resolvePlaybackUri ? await props.resolvePlaybackUri() : props.uri;
+@@ -76,7 +78,16 @@ function LoadedMediaVideo(props: {
+     if (uri === null) throw new Error("Video unavailable");
+     playback.pause();
+     previousPlaybackRequested.current = false;
+-    await player.replaceAsync({ uri, contentType: "progressive" });
++    const media = await loadCertificateMedia(uri, signal);
++    if (signal.aborted) {
++      media.dispose();
++      return;
++    }
++    const previousLease = mediaLease.current;
++    mediaLease.current = media.dispose;
++    await player
++      .replaceAsync({ uri: media.uri, contentType: "progressive" })
++      .finally(() => previousLease?.());
+     if (!signal.aborted && props.playRequested) await playIfUninterrupted();
+   });
+ 
+@@ -94,7 +105,11 @@ function LoadedMediaVideo(props: {
+         if (!controller.signal.aborted) setLoadState("error");
+       },
+     );
+-    return () => controller.abort();
++    return () => {
++      controller.abort();
++      mediaLease.current?.();
++      mediaLease.current = null;
++    };
+     // oxlint-disable-next-line react/exhaustive-effect-dependencies -- A play request or Retry (attempt) reloads the source into the same player.
+   }, [player, props.playRequested, attempt]);
+ 
+diff --git a/apps/mobile/src/features/connection/ClientCertificateField.tsx b/apps/mobile/src/features/connection/ClientCertificateField.tsx
+new file mode 100644
+index 0000000000000000000000000000000000000000..195e640699dc3702e1aaa12f6f8d2f55cd768236
+--- /dev/null
++++ b/apps/mobile/src/features/connection/ClientCertificateField.tsx
+@@ -0,0 +1,96 @@
++import { useState, useSyncExternalStore } from "react";
++import { Pressable, View } from "react-native";
++
++import { SymbolView } from "../../components/ui/AppSymbol";
++import { AppText as Text } from "../../components/ui/AppText";
++import * as Dialog from "../../components/ui/Dialog";
++import {
++  chooseClientCertificate,
++  clientCertificatesAvailable,
++  onClientCertificateChange,
++  removeClientCertificate,
++  selectedClientCertificate,
++} from "../../lib/clientCertificates";
++import { buildPairingUrl } from "./pairing";
++
++function subscribe(listener: () => void) {
++  const subscription = onClientCertificateChange(listener);
++  return () => subscription.remove();
++}
++
++export function ClientCertificateField(props: { host: string; disabled?: boolean }) {
++  const endpoint = buildPairingUrl(props.host, "certificate-origin");
++  const alias = useSyncExternalStore(
++    subscribe,
++    () => selectedClientCertificate(endpoint),
++    () => null,
++  );
++  const [busy, setBusy] = useState(false);
++  const [expanded, setExpanded] = useState(false);
++  if (!clientCertificatesAvailable) return null;
++  const act = (remove: boolean) => {
++    setBusy(true);
++    void (remove ? removeClientCertificate(endpoint) : chooseClientCertificate(endpoint))
++      .catch((error: unknown) => {
++        Dialog.alert(
++          "Client certificate",
++          error instanceof Error ? error.message : "Could not select certificate.",
++        );
++      })
++      .finally(() => setBusy(false));
++  };
++  const disabled = busy || props.disabled || !props.host.trim();
++  return (
++    <View className="rounded-xl bg-foreground/5">
++      <Pressable
++        accessibilityRole="button"
++        accessibilityState={{ expanded }}
++        onPress={() => setExpanded((value) => !value)}
++        className="flex-row items-center justify-between px-4 py-3"
++      >
++        <View className="gap-1">
++          <Text className="text-sm text-foreground-muted">Advanced settings</Text>
++          {alias ? (
++            <Text className="text-xs text-foreground-muted">Certificate selected</Text>
++          ) : null}
++        </View>
++        <SymbolView
++          name={expanded ? "chevron.up" : "chevron.down"}
++          size={16}
++          tintColorClassName="accent-icon-muted"
++        />
++      </Pressable>
++      {expanded ? (
++        <View className="gap-2 px-4 pb-3">
++          <Text className="text-2xs font-t3-bold uppercase text-foreground-muted">
++            Client certificate (optional)
++          </Text>
++          <Text className="text-sm text-foreground-muted">
++            {alias ?? "None selected"}. Applies to this HTTPS host and port, including other
++            environments using the same address.
++          </Text>
++          <Pressable
++            accessibilityRole="button"
++            disabled={disabled}
++            onPress={() => act(false)}
++            className="rounded-xl bg-input px-4 py-3"
++          >
++            <Text className="text-foreground">
++              {busy ? "Please wait…" : alias ? "Change certificate" : "Select certificate"}
++            </Text>
++          </Pressable>
++          {alias ? (
++            <Pressable
++              accessibilityRole="button"
++              disabled={disabled}
++              onPress={() => act(true)}
++              className="px-4 py-2"
++            >
++              <Text className="text-danger-foreground">Remove certificate</Text>
++            </Pressable>
++          ) : null}
++        </View>
++      ) : null}
++    </View>
++  );
++}
+diff --git a/apps/mobile/src/features/connection/ConnectionEnvironmentRow.tsx b/apps/mobile/src/features/connection/ConnectionEnvironmentRow.tsx
+index 8174b6bdfe8ef9ee3cb22aa74dc755976e89c8ba..8aa5864991ca8dc61d9d6d6c38ee903faa0f7ac3 100644
+--- a/apps/mobile/src/features/connection/ConnectionEnvironmentRow.tsx
++++ b/apps/mobile/src/features/connection/ConnectionEnvironmentRow.tsx
+@@ -1,6 +1,7 @@
+ import { errorDisplayMessage } from "@t3tools/client-runtime/errors";
+ import { msg, T, useGT, useMessages } from "gt-react-native";
+ import * as Dialog from "../../components/ui/Dialog";
++import { ClientCertificateField } from "./ClientCertificateField";
+ import { ConnectionTraceId } from "./ConnectionTraceId";
+ import { SymbolView } from "../../components/ui/AppSymbol";
+ import { hasSavedBearerRoute, hostFreezeNotice } from "@t3tools/client-runtime/connection";
+@@ -256,6 +257,7 @@ export function ConnectionEnvironmentRow(props: {
+                 value={url}
+                 onChangeText={setUrl}
+               />
++              <ClientCertificateField host={url} />
+             </>
+           )}
+ 
+diff --git a/apps/mobile/src/features/connection/ConnectionsNewRouteScreen.tsx b/apps/mobile/src/features/connection/ConnectionsNewRouteScreen.tsx
+index d3597a28aca1b58194c0e0970acffd00aaa87108..8b6a4806cc269c768b0a8afabbc4f9fb9474c0a2 100644
+--- a/apps/mobile/src/features/connection/ConnectionsNewRouteScreen.tsx
++++ b/apps/mobile/src/features/connection/ConnectionsNewRouteScreen.tsx
+@@ -24,6 +24,7 @@ import { useAppearancePreferences } from "../settings/appearance/AppearancePrefe
+ import { SettingsScreen } from "../settings/components/SettingsScreen";
+ import { AppText as Text, AppTextInput, type AppTextInputProps } from "../../components/ui/AppText";
+ import { FrostedCutout } from "../../components/ui/FrostedCutout";
++import { ClientCertificateField } from "./ClientCertificateField";
+ import { buildPairingUrl, extractPairingUrlFromQrPayload, parsePairingUrl } from "./pairing";
+ import { useRemoteConnections } from "../../state/use-remote-environment-registry";
+ import { SymbolView } from "../../components/ui/AppSymbol";
+@@ -287,6 +288,7 @@ function PairingForm({
+                       "For machines on your local network or tailnet. The machine keeps its own provider credentials.",
+                     ))}
+             </Text>
++            <ClientCertificateField host={hostInput} disabled={isSubmitting} />
+           </View>
+ 
+           <SshEnvironmentSection onConnected={close} />
+diff --git a/apps/mobile/src/features/connection/useConnectionController.ts b/apps/mobile/src/features/connection/useConnectionController.ts
+index c693681cccbaa206c9329c84355880bc8e0e1da5..5591fbb164ececf97777f8ed70f4891de385b6f4 100644
+--- a/apps/mobile/src/features/connection/useConnectionController.ts
++++ b/apps/mobile/src/features/connection/useConnectionController.ts
+@@ -11,6 +11,7 @@ import type {
+ import { errorDisplayMessage } from "@t3tools/client-runtime/errors";
+ import { useMessages } from "gt-react-native";
+ import * as Option from "effect/Option";
++import { AsyncResult } from "effect/reactivity";
+ import { useMemo } from "react";
+ 
+ import { environmentCatalog } from "../../connection/catalog";
+@@ -18,6 +19,7 @@ import {
+   connectPairingUrl as connectPairingUrlAtom,
+   updateBearerConnection,
+ } from "../../connection/onboarding";
++import { removeClientCertificate, selectedClientCertificate } from "../../lib/clientCertificates";
+ import { useWorkspaceEnvironments } from "../../state/workspace";
+ import { relayEnvironmentDiscovery } from "../../state/relay";
+ import { useAtomCommand } from "../../state/use-atom-command";
+@@ -84,8 +86,27 @@ export function useConnectionController() {
+         }),
+       }),
+     );
+-  const removeEnvironment = (environmentId: EnvironmentId) =>
+-    removeEnvironmentMutation(environmentId);
++  const removeEnvironment = async (environmentId: EnvironmentId) => {
++    const environment = connectedEnvironments.find(
++      (entry) => entry.environmentId === environmentId,
++    );
++    const result = await removeEnvironmentMutation(environmentId);
++    if (
++      AsyncResult.isSuccess(result) &&
++      environment &&
++      selectedClientCertificate(environment.displayUrl)
++    ) {
++      const origin = new URL(environment.displayUrl).origin;
++      const shared = connectedEnvironments.some(
++        (entry) =>
++          entry.environmentId !== environmentId &&
++          entry.displayUrl &&
++          new URL(entry.displayUrl).origin === origin,
++      );
++      if (!shared) await removeClientCertificate(environment.displayUrl);
++    }
++    return result;
++  };
+   const setEnvironmentEnabled = (environmentId: EnvironmentId, enabled: boolean) =>
+     setEnvironmentEnabledMutation({ environmentId, enabled });
+   const updateEnvironment = (
+diff --git a/apps/mobile/src/lib/attachmentDownload.test.ts b/apps/mobile/src/lib/attachmentDownload.test.ts
+index 07a0a80a0c6bd96224020b282e1abc61477256b2..bf12b39457d89782aefe45dd7a8bb26ef2f7798c 100644
+--- a/apps/mobile/src/lib/attachmentDownload.test.ts
++++ b/apps/mobile/src/lib/attachmentDownload.test.ts
+@@ -1,6 +1,7 @@
+ import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
+ 
+ const mocks = vi.hoisted(() => ({
++  certificateTransfer: vi.fn(),
+   directories: new Set<string>(),
+   deleted: vi.fn(),
+   download: vi.fn(),
+@@ -12,6 +13,10 @@ const mocks = vi.hoisted(() => ({
+   uuid: vi.fn(),
+ }));
+ 
++vi.mock("./clientCertificates", () => ({
++  transferWithClientCertificate: mocks.certificateTransfer,
++}));
++
+ vi.mock("expo-file-system", () => {
+   class Directory {
+     readonly uri: string;
+@@ -74,6 +79,7 @@ vi.mock("./shareFileFromSource", () => ({ shareFileFromSource: mocks.shareFromSo
+ import {
+   downloadAndShareAttachment,
+   downloadAttachmentForPreview,
++  openAttachmentInViewer,
+   shareLocalAttachment,
+ } from "./attachmentDownload";
+ import { isForegroundHandoffActive } from "./foreground-handoff";
+@@ -88,6 +94,7 @@ const input = {
+ beforeEach(() => {
+   mocks.open.mockReset();
+   mocks.open.mockResolvedValue(undefined);
++  mocks.certificateTransfer.mockReset().mockResolvedValue(null);
+   mocks.directories.clear();
+   mocks.deleted.mockReset();
+   mocks.download.mockReset();
+@@ -344,3 +351,53 @@ describe("attachment preview files", () => {
+     expect(mocks.deleted).toHaveBeenCalledTimes(1);
+   });
+ });
++
++describe("certificate-protected attachment downloads", () => {
++  it("uses native TLS transfer and shares the downloaded file", async () => {
++    mocks.certificateTransfer.mockResolvedValue({ status: 200 });
++    const result = await downloadAttachmentForPreview({
++      ...input,
++      signal: new AbortController().signal,
++    });
++    expect(result?.uri).toContain("report.pdf");
++    expect(mocks.download).not.toHaveBeenCalled();
++    result?.dispose();
++  });
++  it("does not retry a certificate failure anonymously", async () => {
++    mocks.certificateTransfer.mockRejectedValue(new Error("Certificate unavailable"));
++    await expect(
++      downloadAttachmentForPreview({ ...input, signal: new AbortController().signal }),
++    ).rejects.toThrow("Could not download");
++    expect(mocks.download).not.toHaveBeenCalled();
++    expect(mocks.deleted).toHaveBeenCalled();
++  });
++  it("opens a protected remote file in the viewer through native TLS transfer", async () => {
++    mocks.certificateTransfer.mockResolvedValue({ status: 200 });
++    await openAttachmentInViewer({
++      uri: input.url,
++      attachment: input.attachment,
++      signal: new AbortController().signal,
++    });
++    expect(mocks.certificateTransfer).toHaveBeenCalledWith(
++      expect.objectContaining({ url: input.url }),
++    );
++    expect(mocks.download).not.toHaveBeenCalled();
++    expect(mocks.open).toHaveBeenCalledWith(
++      expect.stringContaining("report.pdf"),
++      "application/pdf",
++    );
++  });
++  it("does not open a viewer anonymously after a certificate failure", async () => {
++    mocks.certificateTransfer.mockRejectedValue(new Error("Certificate unavailable"));
++    await expect(
++      openAttachmentInViewer({
++        uri: input.url,
++        attachment: input.attachment,
++        signal: new AbortController().signal,
++      }),
++    ).rejects.toThrow("Certificate unavailable");
++    expect(mocks.download).not.toHaveBeenCalled();
++    expect(mocks.open).not.toHaveBeenCalled();
++    expect(mocks.deleted).toHaveBeenCalled();
++  });
++});
+diff --git a/apps/mobile/src/lib/attachmentDownload.ts b/apps/mobile/src/lib/attachmentDownload.ts
+index 13568a8fe85b548bed42e0094ac8cac08289d7aa..88c47931d8ceaa02c359a8c4870026ec38223509 100644
+--- a/apps/mobile/src/lib/attachmentDownload.ts
++++ b/apps/mobile/src/lib/attachmentDownload.ts
+@@ -1,3 +1,4 @@
++import { transferWithClientCertificate } from "./clientCertificates";
+ import type { ChatFileAttachment } from "@t3tools/contracts";
+ import type { Directory } from "expo-file-system";
+ import type { SharingOptions } from "expo-sharing";
+@@ -182,7 +183,13 @@ export async function openAttachmentInViewer(input: {
+     if (/^(file|content):/.test(input.uri)) {
+       await new File(input.uri).copy(cached.file);
+     } else {
+-      await File.downloadFileAsync(input.uri, cached.file, { signal: input.signal });
++      const transferred = await transferWithClientCertificate({
++        url: input.uri,
++        fileUri: cached.file.uri,
++        signal: input.signal,
++      });
++      if (transferred === null)
++        await File.downloadFileAsync(input.uri, cached.file, { signal: input.signal });
+     }
+     if (input.signal.aborted) return;
+     const endHandoff = beginForegroundHandoff();
+@@ -216,7 +223,13 @@ export async function downloadAttachmentForPreview(input: {
+       cached.preview.dispose();
+       return null;
+     }
+-    await File.downloadFileAsync(input.url, cached.file, { signal: input.signal });
++    const transferred = await transferWithClientCertificate({
++      url: input.url,
++      fileUri: cached.file.uri,
++      signal: input.signal,
++    });
++    if (transferred === null)
++      await File.downloadFileAsync(input.url, cached.file, { signal: input.signal });
+     if (input.signal.aborted) {
+       cached.preview.dispose();
+       return null;
+diff --git a/apps/mobile/src/lib/attachmentUpload.test.ts b/apps/mobile/src/lib/attachmentUpload.test.ts
+index e72996f41648ad848982aa309d64809bef78e747..79bd417462cee21e190a288911d1a92f229c3610 100644
+--- a/apps/mobile/src/lib/attachmentUpload.test.ts
++++ b/apps/mobile/src/lib/attachmentUpload.test.ts
+@@ -5,6 +5,7 @@ import { beforeEach, vi } from "vite-plus/test";
+ 
+ const mocks = vi.hoisted(() => ({
+   canOperate: true,
++  certificateTransfer: vi.fn(),
+   documentUri: "file:///documents",
+   createAssetUrl: vi.fn(),
+   createUploadUrl: Symbol("create-upload-url"),
+@@ -84,6 +85,10 @@ vi.mock("./uuid", () => ({
+   randomHex: () => "0000",
+ }));
+ 
++vi.mock("./clientCertificates", () => ({
++  transferWithClientCertificate: mocks.certificateTransfer,
++}));
++
+ vi.mock("expo-file-system", () => ({
+   File: class {
+     readonly uri: string;
+@@ -198,6 +203,7 @@ function removeCallsFor(attachmentId: string): number {
+ describe("prepareTurnAttachments", () => {
+   beforeEach(() => {
+     mocks.canOperate = true;
++    mocks.certificateTransfer.mockReset().mockResolvedValue(null);
+     mocks.documentUri = "file:///documents";
+     mocks.createAssetUrl.mockReset();
+     mocks.createAssetUrl.mockImplementation((target: unknown) => target);
+@@ -226,6 +232,38 @@ describe("prepareTurnAttachments", () => {
+     mocks.upload.mockResolvedValue({ status: 204, body: "", headers: {} });
+   });
+ 
++  it.effect("uploads protected files through the certificate transport", () =>
++    Effect.gen(function* () {
++      mocks.certificateTransfer.mockResolvedValue({ status: 204 });
++      yield* prepare({ environmentId, attachments: [file] });
++      expect(mocks.certificateTransfer).toHaveBeenCalledWith(
++        expect.objectContaining({ upload: true, contentType: file.mimeType }),
++      );
++      expect(mocks.upload).not.toHaveBeenCalled();
++    }),
++  );
++
++  it.effect("sends the wire mime type through the certificate transport", () =>
++    Effect.gen(function* () {
++      mocks.certificateTransfer.mockResolvedValue({ status: 204 });
++      yield* prepare({ environmentId, attachments: [documentPickedImage] });
++      expect(mocks.certificateTransfer).toHaveBeenCalledWith(
++        expect.objectContaining({ upload: true, contentType: "image/png" }),
++      );
++      expect(mocks.upload).not.toHaveBeenCalled();
++    }),
++  );
++
++  it.effect("does not upload anonymously after a certificate failure", () =>
++    Effect.gen(function* () {
++      mocks.certificateTransfer.mockRejectedValue(new Error("Certificate unavailable"));
++      expect(
++        (yield* Effect.flip(prepare({ environmentId, attachments: [file] }))).message,
++      ).toContain("Certificate unavailable");
++      expect(mocks.upload).not.toHaveBeenCalled();
++    }),
++  );
++
+   it.effect("does not mint or transfer attachments without task operation access", () =>
+     Effect.gen(function* () {
+       mocks.canOperate = false;
+diff --git a/apps/mobile/src/lib/attachmentUpload.ts b/apps/mobile/src/lib/attachmentUpload.ts
+index 038033608eb664bc3a4e8e4f313dd6f75ad13cc0..cd48770b946dba96826879a188b1a61fb8765c39 100644
+--- a/apps/mobile/src/lib/attachmentUpload.ts
++++ b/apps/mobile/src/lib/attachmentUpload.ts
+@@ -1,3 +1,4 @@
++import { transferWithClientCertificate } from "./clientCertificates";
+ import { resolveAssetUrl } from "@t3tools/client-runtime/state/assets";
+ import {
+   isAssetAttachmentNotFoundFailure,
+@@ -234,21 +235,31 @@ async function uploadFileBytes(
+         encoding: "base64",
+       });
+     }
+-    const result = await file.upload(url, {
+-      httpMethod: "POST",
+-      uploadType: UploadType.BINARY_CONTENT,
+-      headers: { "Content-Type": composerAttachmentWireMimeType(attachment) },
+-      signal,
+-      ...(onProgress
+-        ? {
+-            // Native events carry Int64 counts, which expo-modules-jsi delivers as BigInt despite the `number` type.
+-            onProgress: ({ bytesSent, totalBytes }) => {
+-              const total = Number(totalBytes);
+-              if (total > 0) onProgress(Number(bytesSent) / total);
+-            },
+-          }
+-        : {}),
+-    });
++    const contentType = composerAttachmentWireMimeType(attachment);
++    const result =
++      (await transferWithClientCertificate({
++        url,
++        fileUri: file.uri,
++        upload: true,
++        contentType,
++        signal,
++        onProgress,
++      })) ??
++      (await file.upload(url, {
++        httpMethod: "POST",
++        uploadType: UploadType.BINARY_CONTENT,
++        headers: { "Content-Type": contentType },
++        signal,
++        ...(onProgress
++          ? {
++              // Native events carry Int64 counts, which expo-modules-jsi delivers as BigInt despite the `number` type.
++              onProgress: ({ bytesSent, totalBytes }) => {
++                const total = Number(totalBytes);
++                if (total > 0) onProgress(Number(bytesSent) / total);
++              },
++            }
++          : {}),
++      }));
+     if (result.status < 200 || result.status >= 300) {
+       throw new Error(
+         m(
+diff --git a/apps/mobile/src/lib/certificateMedia.test.ts b/apps/mobile/src/lib/certificateMedia.test.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..f4a0877f338b3f3b53646737bfec9462edb746c4
+--- /dev/null
++++ b/apps/mobile/src/lib/certificateMedia.test.ts
+@@ -0,0 +1,81 @@
++import { beforeEach, expect, it, vi } from "vite-plus/test";
++
++const mocks = vi.hoisted(() => ({
++  selected: vi.fn(),
++  transfer: vi.fn(),
++  remove: vi.fn(),
++}));
++vi.mock("./clientCertificates", () => ({
++  selectedClientCertificate: mocks.selected,
++  transferWithClientCertificate: mocks.transfer,
++}));
++vi.mock("./uuid", () => ({ uuidv4: () => "unique-id" }));
++vi.mock("expo-file-system", () => ({
++  Paths: { cache: "file:///cache" },
++  File: class {
++    uri = "file:///cache/t3-mtls-media-unique-id";
++    exists = true;
++    delete = mocks.remove;
++  },
++}));
++import { loadCertificateMedia } from "./certificateMedia";
++
++beforeEach(() => {
++  vi.resetAllMocks();
++  mocks.selected.mockReturnValue("phone");
++  mocks.transfer.mockResolvedValue({ status: 200 });
++});
++
++it("keeps public and local media on their original loader", async () => {
++  mocks.selected.mockReturnValue(null);
++  for (const uri of ["file:///cache/local.mp4", "https://public.example/image.png"]) {
++    const media = await loadCertificateMedia(uri, new AbortController().signal);
++    expect(media.uri).toBe(uri);
++    media.dispose();
++  }
++  expect(mocks.transfer).not.toHaveBeenCalled();
++  expect(mocks.remove).not.toHaveBeenCalled();
++});
++
++it("leases the protected download until its native consumer releases it", async () => {
++  const signal = new AbortController().signal;
++  Object.defineProperty(signal, "throwIfAborted", { value: undefined });
++  const media = await loadCertificateMedia("https://host/video.mp4", signal);
++  expect(media.uri).toBe("file:///cache/t3-mtls-media-unique-id");
++  expect(mocks.remove).not.toHaveBeenCalled();
++  media.dispose();
++  expect(mocks.remove).toHaveBeenCalledOnce();
++});
++
++it("cleans a partial download on native failure without returning the original URL", async () => {
++  mocks.transfer.mockRejectedValue(new Error("HTTP 401"));
++  await expect(
++    loadCertificateMedia("https://host/video", new AbortController().signal),
++  ).rejects.toThrow("401");
++  expect(mocks.remove).toHaveBeenCalledOnce();
++});
++
++it("does not fall back to an anonymous loader if the choice changes during setup", async () => {
++  mocks.transfer.mockResolvedValue(null);
++  await expect(
++    loadCertificateMedia("https://host/video", new AbortController().signal),
++  ).rejects.toThrow("Certificate selection changed");
++  expect(mocks.remove).toHaveBeenCalledOnce();
++});
++
++it("removes a completed download if cancellation won the race", async () => {
++  const controller = new AbortController();
++  mocks.transfer.mockImplementation(async () => {
++    controller.abort();
++    return { status: 200 };
++  });
++  await expect(loadCertificateMedia("https://host/video", controller.signal)).rejects.toThrow();
++  expect(mocks.remove).toHaveBeenCalledOnce();
++});
++
++it("does not start a canceled protected download", async () => {
++  const controller = new AbortController();
++  controller.abort();
++  await expect(loadCertificateMedia("https://host/video", controller.signal)).rejects.toThrow();
++  expect(mocks.transfer).not.toHaveBeenCalled();
++});
+diff --git a/apps/mobile/src/lib/certificateMedia.ts b/apps/mobile/src/lib/certificateMedia.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..7f80e7f7a0c4011a50431b3a16a4680b6083a636
+--- /dev/null
++++ b/apps/mobile/src/lib/certificateMedia.ts
+@@ -0,0 +1,25 @@
++import { selectedClientCertificate, transferWithClientCertificate } from "./clientCertificates";
++import { uuidv4 } from "./uuid";
++
++/** Expo Video bypasses React Native's TLS hooks, so protected videos need a private file lease. */
++export async function loadCertificateMedia(
++  uri: string,
++  signal: AbortSignal,
++): Promise<{ uri: string; dispose(): void }> {
++  if (!selectedClientCertificate(uri)) return { uri, dispose() {} };
++  if (signal.aborted) throw new Error("Media download cancelled.");
++  const { File, Paths } = await import("expo-file-system");
++  const file = new File(Paths.cache, `t3-mtls-media-${uuidv4()}`);
++  const dispose = () => {
++    if (file.exists) file.delete();
++  };
++  try {
++    const result = await transferWithClientCertificate({ url: uri, fileUri: file.uri, signal });
++    if (result === null) throw new Error("Certificate selection changed. Try again.");
++    if (signal.aborted) throw new Error("Media download cancelled.");
++    return { uri: file.uri, dispose };
++  } catch (error) {
++    dispose();
++    throw error;
++  }
++}
+diff --git a/apps/mobile/src/lib/clientCertificates.android.test.ts b/apps/mobile/src/lib/clientCertificates.android.test.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..7daa8fc46f74324e96189898db5a0d14d9ef6f32
+--- /dev/null
++++ b/apps/mobile/src/lib/clientCertificates.android.test.ts
+@@ -0,0 +1,119 @@
++import { beforeEach, expect, it, vi } from "vite-plus/test";
++
++const mocks = vi.hoisted(() => ({
++  getAlias: vi.fn(),
++  transfer: vi.fn(),
++  createTransfer: vi.fn(() => "transfer-id"),
++  cancel: vi.fn(),
++  removeListener: vi.fn(),
++  listener: undefined as
++    | undefined
++    | ((event: { id: string; bytesSent: number; totalBytes: number }) => void),
++}));
++vi.mock("expo", () => ({
++  requireOptionalNativeModule: () => ({
++    getAlias: mocks.getAlias,
++    transfer: mocks.transfer,
++    createTransfer: mocks.createTransfer,
++    cancel: mocks.cancel,
++    addListener: (_: string, listener: typeof mocks.listener) => {
++      mocks.listener = listener;
++      return { remove: mocks.removeListener };
++    },
++  }),
++}));
++import { transferWithClientCertificate } from "./clientCertificates.android";
++
++const input = { url: "https://server.example/upload", fileUri: "file:///app/file", upload: true };
++beforeEach(() => {
++  vi.clearAllMocks();
++  mocks.getAlias.mockReturnValue("phone");
++  mocks.transfer.mockResolvedValue({ status: 204 });
++});
++it("leaves ordinary destinations on their existing transport", async () => {
++  mocks.getAlias.mockReturnValue(null);
++  expect(
++    await transferWithClientCertificate({ ...input, signal: new AbortController().signal }),
++  ).toBeNull();
++  expect(mocks.transfer).not.toHaveBeenCalled();
++});
++it("preserves an HTTP error status instead of treating it as a TLS failure", async () => {
++  mocks.transfer.mockResolvedValue({ status: 401 });
++  expect(
++    await transferWithClientCertificate({ ...input, signal: new AbortController().signal }),
++  ).toEqual({ status: 401 });
++});
++it("does not downgrade native certificate errors to anonymous transfers", async () => {
++  mocks.transfer.mockRejectedValue(new Error("KeyChain grant revoked"));
++  await expect(
++    transferWithClientCertificate({ ...input, signal: new AbortController().signal }),
++  ).rejects.toThrow("grant revoked");
++});
++it("does not start an already aborted transfer", async () => {
++  const controller = new AbortController();
++  controller.abort();
++  await expect(
++    transferWithClientCertificate({ ...input, signal: controller.signal }),
++  ).rejects.toThrow();
++  expect(mocks.transfer).not.toHaveBeenCalled();
++});
++it("cancels the native operation and releases its progress listener", async () => {
++  const controller = new AbortController();
++  let finish!: (value: { status: number }) => void;
++  mocks.transfer.mockImplementation(
++    () =>
++      new Promise((resolve) => {
++        finish = resolve;
++      }),
++  );
++  const pending = transferWithClientCertificate({
++    ...input,
++    signal: controller.signal,
++    onProgress: vi.fn(),
++  });
++  controller.abort();
++  expect(mocks.cancel).toHaveBeenCalledWith("transfer-id");
++  finish({ status: 204 });
++  await expect(pending).rejects.toThrow();
++  expect(mocks.removeListener).toHaveBeenCalledOnce();
++});
++it("reports only this transfer's progress", async () => {
++  const progress = vi.fn();
++  mocks.transfer.mockImplementation(async () => {
++    mocks.listener?.({ id: "other", bytesSent: 9, totalBytes: 10 });
++    mocks.listener?.({ id: "transfer-id", bytesSent: 5, totalBytes: 10 });
++    return { status: 204 };
++  });
++  await transferWithClientCertificate({
++    ...input,
++    signal: new AbortController().signal,
++    onProgress: progress,
++  });
++  expect(progress).toHaveBeenCalledExactlyOnceWith(0.5);
++  expect(mocks.removeListener).toHaveBeenCalledOnce();
++});
++
++it("releases native registration when aborted before the queued transfer starts", async () => {
++  const controller = new AbortController();
++  mocks.createTransfer.mockImplementationOnce(() => {
++    controller.abort();
++    return "transfer-id";
++  });
++  await expect(
++    transferWithClientCertificate({ ...input, signal: controller.signal }),
++  ).rejects.toThrow();
++  expect(mocks.transfer).not.toHaveBeenCalled();
++  expect(mocks.cancel).toHaveBeenCalledWith("transfer-id");
++});
++
++it("works with React Native signals without throwIfAborted", async () => {
++  const controller = new AbortController();
++  Object.defineProperty(controller.signal, "throwIfAborted", { value: undefined });
++  expect(await transferWithClientCertificate({ ...input, signal: controller.signal })).toEqual({
++    status: 204,
++  });
++  controller.abort();
++  await expect(
++    transferWithClientCertificate({ ...input, signal: controller.signal }),
++  ).rejects.toThrow("cancelled");
++});
+diff --git a/apps/mobile/src/lib/clientCertificates.android.ts b/apps/mobile/src/lib/clientCertificates.android.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..c6cadacfcf9ace387590de0e7f7c9105dfe2099a
+--- /dev/null
++++ b/apps/mobile/src/lib/clientCertificates.android.ts
+@@ -0,0 +1,78 @@
++import { requireOptionalNativeModule } from "expo";
++
++import type {
++  ClientCertificateSubscription as Subscription,
++  ClientCertificateTransferInput,
++} from "./clientCertificates.types";
++
++interface CertificateModule {
++  getAlias(url: string): string | null;
++  choose(url: string): Promise<string | null>;
++  remove(url: string): Promise<void>;
++  createTransfer(url: string): string;
++  transfer(
++    id: string,
++    fileUri: string,
++    upload: boolean,
++    contentType: string,
++  ): Promise<{ status: number }>;
++  cancel(id: string): void;
++  addListener(
++    name: "transferProgress",
++    listener: (event: { id: string; bytesSent: number; totalBytes: number }) => void,
++  ): Subscription;
++  addListener(name: "changed", listener: (event: { origin: string }) => void): Subscription;
++}
++
++// Android installs the transport in MainApplication before Expo/React Native create clients.
++// Preferences are read natively, so cold-start reconnect does not race JS hydration.
++const native = requireOptionalNativeModule<CertificateModule>("T3ClientCertificates");
++
++export const clientCertificatesAvailable = native !== null;
++export const selectedClientCertificate = (url: string): string | null =>
++  native?.getAlias(url) ?? null;
++export const onClientCertificateChange = (listener: () => void): Subscription =>
++  native?.addListener("changed", listener) ?? { remove() {} };
++export const chooseClientCertificate = (url: string): Promise<string | null> => {
++  if (!native)
++    return Promise.reject(new Error("Client certificates require the Android custom build."));
++  return native.choose(url);
++};
++export const removeClientCertificate = (url: string): Promise<void> => {
++  if (!native)
++    return Promise.reject(new Error("Client certificates require the Android custom build."));
++  return native.remove(url);
++};
++
++/** Returns null for ordinary destinations; callers retain their existing Expo transfer path. */
++export async function transferWithClientCertificate(
++  input: ClientCertificateTransferInput,
++): Promise<{ status: number } | null> {
++  if (!native || !selectedClientCertificate(input.url)) return null;
++  if (input.signal.aborted) throw new Error("Transfer cancelled.");
++  const id = native.createTransfer(input.url);
++  const cancel = () => native.cancel(id);
++  let subscription: Subscription | null = null;
++  try {
++    subscription = input.onProgress
++      ? native.addListener("transferProgress", (event) => {
++          if (event.id === id && event.totalBytes > 0)
++            input.onProgress?.(event.bytesSent / event.totalBytes);
++        })
++      : null;
++    input.signal.addEventListener("abort", cancel, { once: true });
++    if (input.signal.aborted) throw new Error("Transfer cancelled.");
++    const result = await native.transfer(
++      id,
++      input.fileUri,
++      input.upload ?? false,
++      input.contentType ?? "application/octet-stream",
++    );
++    if (input.signal.aborted) throw new Error("Transfer cancelled.");
++    return result;
++  } finally {
++    input.signal.removeEventListener("abort", cancel);
++    native.cancel(id);
++    subscription?.remove();
++  }
++}
+diff --git a/apps/mobile/src/lib/clientCertificates.ts b/apps/mobile/src/lib/clientCertificates.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..44c03972802d38a440e1cee4b0d90d89dca341df
+--- /dev/null
++++ b/apps/mobile/src/lib/clientCertificates.ts
+@@ -0,0 +1,22 @@
++import type {
++  ClientCertificateSubscription,
++  ClientCertificateTransferInput,
++} from "./clientCertificates.types";
++
++// Client certificates are Android-only (clientCertificates.android.ts). Elsewhere every
++// destination keeps its existing transport.
++const unsupported = () =>
++  Promise.reject(new Error("Client certificates are only supported on Android."));
++
++export const clientCertificatesAvailable = false;
++export const selectedClientCertificate = (_url: string): string | null => null;
++export const onClientCertificateChange = (
++  _listener: () => void,
++): ClientCertificateSubscription => ({
++  remove() {},
++});
++export const chooseClientCertificate = (_url: string): Promise<string | null> => unsupported();
++export const removeClientCertificate = (_url: string): Promise<void> => unsupported();
++export const transferWithClientCertificate = async (
++  _input: ClientCertificateTransferInput,
++): Promise<{ status: number } | null> => null;
+diff --git a/apps/mobile/src/lib/clientCertificates.types.ts b/apps/mobile/src/lib/clientCertificates.types.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..b106d8bd6b00d7c030e3424cdb06f5b454ae9a92
+--- /dev/null
++++ b/apps/mobile/src/lib/clientCertificates.types.ts
+@@ -0,0 +1,12 @@
++export interface ClientCertificateSubscription {
++  remove(): void;
++}
++
++export interface ClientCertificateTransferInput {
++  readonly url: string;
++  readonly fileUri: string;
++  readonly upload?: boolean;
++  readonly contentType?: string;
++  readonly signal: AbortSignal;
++  readonly onProgress?: (progress: number) => void;
++}
+diff --git a/apps/mobile/src/lib/runtime.ts b/apps/mobile/src/lib/runtime.ts
+index 576289fcae56cb5eacfc402d6b23e4ebbd6ec8bf..08117da22322441b2594494c739f205d9191af78 100644
+--- a/apps/mobile/src/lib/runtime.ts
++++ b/apps/mobile/src/lib/runtime.ts
+@@ -1,3 +1,4 @@
++import "./clientCertificates";
+ import * as Effect from "effect/Effect";
+ import * as Layer from "effect/Layer";
+ import * as ManagedRuntime from "effect/ManagedRuntime";
+diff --git a/apps/mobile/src/lib/videoThumbnails.test.ts b/apps/mobile/src/lib/videoThumbnails.test.ts
+index a35e62b98ae715ef254129d8ce8916640d571c12..db582209c2b20702e14796c86bb5b4ca9e74396e 100644
+--- a/apps/mobile/src/lib/videoThumbnails.test.ts
++++ b/apps/mobile/src/lib/videoThumbnails.test.ts
+@@ -1,6 +1,7 @@
+ import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
+ 
+-const mocks = vi.hoisted(() => ({ createPlayer: vi.fn() }));
++const mocks = vi.hoisted(() => ({ createPlayer: vi.fn(), loadMedia: vi.fn() }));
++vi.mock("./certificateMedia", () => ({ loadCertificateMedia: mocks.loadMedia }));
+ vi.mock("expo-video", () => ({ createVideoPlayer: mocks.createPlayer }));
+ 
+ let thumbnails: typeof import("./videoThumbnails");
+@@ -24,6 +25,7 @@ const source = () => ({ uri: "file:///clip.mp4", dispose: vi.fn() });
+ beforeEach(async () => {
+   vi.resetModules();
+   mocks.createPlayer.mockReset().mockImplementation(player);
++  mocks.loadMedia.mockReset().mockImplementation(async (uri: string) => ({ uri, dispose() {} }));
+   thumbnails = await import("./videoThumbnails");
+ });
+ 
+@@ -138,4 +140,51 @@ describe("video thumbnails", () => {
+     expect(file.dispose).toHaveBeenCalledTimes(1);
+     expect(await next).toBe(frame);
+   });
++
++  it("times out a protected download and disposes its late cache file", async () => {
++    vi.useFakeTimers();
++    const started = Promise.withResolvers<AbortSignal>();
++    const downloaded = Promise.withResolvers<{ uri: string; dispose(): void }>();
++    mocks.loadMedia.mockImplementationOnce((_uri: string, signal: AbortSignal) => {
++      started.resolve(signal);
++      return downloaded.promise;
++    });
++    const request = thumbnails.loadVideoThumbnail(
++      "protected",
++      async () => source(),
++      new AbortController().signal,
++    );
++    const downloadSignal = await started.promise;
++    await vi.advanceTimersByTimeAsync(15_000);
++    expect(await request).toBeNull();
++    expect(downloadSignal.aborted).toBe(true);
++    expect(
++      await thumbnails.loadVideoThumbnail(
++        "next",
++        async () => source(),
++        new AbortController().signal,
++      ),
++    ).toBe(frame);
++    const late = source();
++    downloaded.resolve(late);
++    await vi.advanceTimersByTimeAsync(0);
++    expect(late.dispose).toHaveBeenCalledOnce();
++    expect(mocks.createPlayer).toHaveBeenCalledOnce();
++  });
++
++  it("releases a protected cache file when native player creation fails", async () => {
++    const media = source();
++    mocks.loadMedia.mockResolvedValueOnce(media);
++    mocks.createPlayer.mockImplementationOnce(() => {
++      throw new Error("No player");
++    });
++    expect(
++      await thumbnails.loadVideoThumbnail(
++        "broken",
++        async () => source(),
++        new AbortController().signal,
++      ),
++    ).toBeNull();
++    expect(media.dispose).toHaveBeenCalledOnce();
++  });
+ });
+diff --git a/apps/mobile/src/lib/videoThumbnails.ts b/apps/mobile/src/lib/videoThumbnails.ts
+index 33e4f74e42f63248584b0a64166135ae43b63816..e062928729541d7eac023b575fa6cec12af712c6 100644
+--- a/apps/mobile/src/lib/videoThumbnails.ts
++++ b/apps/mobile/src/lib/videoThumbnails.ts
+@@ -1,3 +1,4 @@
++import { loadCertificateMedia } from "./certificateMedia";
+ import type { VideoThumbnail } from "expo-video";
+ 
+ import type { AttachmentPreviewFile } from "./attachmentDownload";
+@@ -11,29 +12,40 @@ export function cachedVideoThumbnail(key: string): VideoThumbnail | null {
+ }
+ 
+ async function extractFrame(uri: string) {
+-  const { createVideoPlayer } = await import("expo-video");
+-  const player = createVideoPlayer(null);
+-  let disposed = false;
+-  let timeout: ReturnType<typeof setTimeout> | undefined;
++  const controller = new AbortController();
++  let player: ReturnType<typeof import("expo-video").createVideoPlayer> | undefined;
++  let media: Awaited<ReturnType<typeof loadCertificateMedia>> | undefined;
+   let attachedSubscription: { remove(): void } | undefined;
++  const cancel = () => controller.abort();
++  const timedOut = new Promise<null>((resolve) => {
++    controller.signal.addEventListener("abort", () => resolve(null), { once: true });
++  });
++  const timeout = setTimeout(cancel, 15_000);
+   try {
+-    // Never play or change audio settings: thumbnails must leave the shared audio session alone.
+-    player.bufferOptions = { preferredForwardBufferDuration: 1 };
+-    const timedOut = new Promise<null>((resolve) => {
+-      timeout = setTimeout(() => resolve(null), 15_000);
+-    });
+-    // iOS resolves replaceAsync before the main thread attaches the item, and until then
+-    // generateThumbnailsAsync finds no asset and returns no frames.
+-    const attached = new Promise<void>((resolve) => {
+-      attachedSubscription = player.addListener("sourceChange", ({ source }) => {
+-        if (source) resolve();
+-      });
+-    });
+     const frame = (async () => {
+-      await player.replaceAsync({ uri, contentType: "progressive" });
++      const { createVideoPlayer } = await import("expo-video");
++      if (controller.signal.aborted) return null;
++      const loaded = await loadCertificateMedia(uri, controller.signal);
++      if (controller.signal.aborted) {
++        loaded.dispose();
++        return null;
++      }
++      media = loaded;
++      const created = createVideoPlayer(null);
++      player = created;
++      // Never play or change audio settings: thumbnails must leave the shared audio session alone.
++      created.bufferOptions = { preferredForwardBufferDuration: 1 };
++      // iOS resolves replaceAsync before the main thread attaches the item, and until then
++      // generateThumbnailsAsync finds no asset and returns no frames.
++      const attached = new Promise<void>((resolve) => {
++        attachedSubscription = created.addListener("sourceChange", ({ source }) => {
++          if (source) resolve();
++        });
++      });
++      await created.replaceAsync({ uri: media.uri, contentType: "progressive" });
+       await attached;
+-      if (disposed) return null;
+-      const [thumbnail] = await player.generateThumbnailsAsync([0], {
++      if (controller.signal.aborted) return null;
++      const [thumbnail] = await created.generateThumbnailsAsync([0], {
+         maxWidth: 480,
+         maxHeight: 480,
+       });
+@@ -41,10 +53,14 @@ async function extractFrame(uri: string) {
+     })();
+     return await Promise.race([frame, timedOut]);
+   } finally {
+-    disposed = true;
++    cancel();
+     clearTimeout(timeout);
+     attachedSubscription?.remove();
+-    player.release();
++    try {
++      player?.release();
++    } finally {
++      media?.dispose();
++    }
+   }
+ }
+ 
+diff --git a/docs/user/remote-access.md b/docs/user/remote-access.md
+index cd5596705ed98bc1dd0756a1b5838ca027cb6c29..93a82fa66fda0a69599413c44c3c9df53fddd09c 100644
+--- a/docs/user/remote-access.md
++++ b/docs/user/remote-access.md
+@@ -242,6 +242,24 @@ For a plain HTTP LAN endpoint, use the direct pairing URL in a browser that can
+ open it, or pair from the desktop app. On mobile, an IP address entered without a
+ scheme uses HTTP, so include `https://` when your server uses HTTPS.
+ 
++### Android client certificates
++
++If a reverse proxy in front of your server asks for a TLS client certificate (mTLS),
++install that identity under Android's **VPN & app user certificate** credentials. On
++**Add environment**, enter the HTTPS address, open **Advanced settings**, choose
++**Select certificate**, then enter your pairing code. To change or remove the
++certificate later, expand the environment in Connections.
++
++The choice belongs to an exact HTTPS host and port, so environments at the same address
++share it, and changing an environment's address does not carry it over. Removing the
++last environment at an address forgets its choice. The app keeps only the certificate's
++Android alias; the private key stays in Android's credential store. A certificate does
++not replace pairing or server certificate checks.
++
++Requests, the session connection, chat attachments and videos use the certificate.
++Content shown in an embedded web view, such as HTML and SVG file previews, and audio
++playback do not use it yet.
++
+ ## Desktop-managed SSH
+ 
+ In the desktop app, open **Settings → Environments → Add environment**, choose

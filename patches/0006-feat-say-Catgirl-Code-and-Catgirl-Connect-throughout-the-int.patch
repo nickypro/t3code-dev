@@ -20,38 +20,39 @@ index d0882a5dd61e3c4dd8d0f0a63cc8044a949504e6..35123168852190926401ff134e9688e1
    );
  }
 diff --git a/apps/web/src/components/sidebar/SidebarChrome.tsx b/apps/web/src/components/sidebar/SidebarChrome.tsx
-index dd41ddd2a0213113428c5e8d380172fe2288d65a..ab5d29b6b78f003fe14f398ea5409ec9d421cdd3 100644
+index 1dbc9b9fc6366629630f13742cf4ef9954692c81..b52b503b4cf6c15d9468e526b762943ff3ac6b39 100644
 --- a/apps/web/src/components/sidebar/SidebarChrome.tsx
 +++ b/apps/web/src/components/sidebar/SidebarChrome.tsx
-@@ -14,7 +14,6 @@ import {
+@@ -15,7 +15,6 @@ import {
  import { primaryServerKeybindingsAtom } from "../../state/server";
  import { cn } from "../../lib/utils";
- import { usePullRequestsSupported } from "../../state/environments";
+ import { useIssuesSupported, usePullRequestsSupported } from "../../state/environments";
 -import { T3Wordmark } from "../T3Wordmark";
  import {
    resolveEnvironmentIdentificationPillLabel,
    resolveSidebarStageBackdropVariant,
-@@ -178,12 +177,15 @@ function SidebarBrand({ onBackdrop }: { onBackdrop: boolean }) {
- }
- 
+@@ -186,7 +185,9 @@ function SidebarBrand({ onBackdrop }: { onBackdrop: boolean }) {
  function SidebarBrandMark({ onBackdrop }: { onBackdrop: boolean }) {
-+  // "Cat Code" is as wide as upstream's mark: a longer title raises the sidebar's minimum width.
    return (
--    <span className="inline-flex min-w-0 items-baseline gap-1 text-sm font-medium tracking-tight">
+     <span className="inline-flex min-w-0 items-baseline gap-1 text-sm font-medium tracking-tight">
 -      <T3Wordmark aria-label="T3" className="h-[1cap] w-auto shrink-0" />
-+    <span className="inline-flex min-w-0 items-baseline gap-1 text-sm tracking-tight">
-+      <span className="shrink-0 font-bold [text-box:trim-both_cap_alphabetic] supports-[text-box:trim-both_cap_alphabetic]:py-1">
-+        Cat
++      <span className="shrink-0 font-semibold [text-box:trim-both_cap_alphabetic] supports-[text-box:trim-both_cap_alphabetic]:py-1">
++        Catgirl
 +      </span>
        <span
          className={cn(
--          "truncate [text-box:trim-both_cap_alphabetic] supports-[text-box:trim-both_cap_alphabetic]:py-1",
-+          "truncate font-medium [text-box:trim-both_cap_alphabetic] supports-[text-box:trim-both_cap_alphabetic]:py-1",
-           onBackdrop ? "text-white/70" : "text-muted-foreground",
+           "truncate [text-box:trim-both_cap_alphabetic] supports-[text-box:trim-both_cap_alphabetic]:py-1",
+@@ -194,7 +195,7 @@ function SidebarBrandMark({ onBackdrop }: { onBackdrop: boolean }) {
          )}
        >
+         {/* oxlint-disable-next-line t3code/no-untranslated-copy -- product wordmark */}
+-        {"Code"}
++        {"Code :3"}
+       </span>
+     </span>
+   );
 diff --git a/apps/web/src/components/ui/standalone-page.tsx b/apps/web/src/components/ui/standalone-page.tsx
-index 0881b84c52f35ccc4668b47d8a191b668caedd28..df3263a89f032b92d8c03d5607db0bac5bb92b96 100644
+index 987c4c09a91156d50d6cf1396f20cfc88adf4ad3..914815b72eaf7abab154792a68bd625c6ebf8276 100644
 --- a/apps/web/src/components/ui/standalone-page.tsx
 +++ b/apps/web/src/components/ui/standalone-page.tsx
 @@ -1,7 +1,5 @@
@@ -62,22 +63,24 @@ index 0881b84c52f35ccc4668b47d8a191b668caedd28..df3263a89f032b92d8c03d5607db0bac
  export function StandalonePage({ children }: { readonly children: ReactNode }) {
    return (
      // The page owns scrolling because root cannot scroll; safe centering keeps oversized cards top-aligned.
-@@ -24,8 +22,8 @@ export function StandalonePageHeader({
+@@ -24,9 +22,10 @@ export function StandalonePageHeader({
      <>
        <div className="flex items-baseline justify-between gap-3 text-muted-foreground">
          <span className="flex items-baseline gap-1.5" role="img" aria-label="T3 Code">
 -          <T3Wordmark className="h-3 w-auto shrink-0 text-foreground" aria-hidden />
+           {/* oxlint-disable-next-line t3code/no-untranslated-copy -- product wordmark */}
 -          <span className="text-lg font-medium tracking-tight">Code</span>
 +          <span className="text-lg font-semibold tracking-tight text-foreground">Catgirl</span>
++          {/* oxlint-disable-next-line t3code/no-untranslated-copy -- product wordmark */}
 +          <span className="text-lg font-medium tracking-tight">Code :3</span>
          </span>
          {context ? <span className="text-sm">{context}</span> : null}
        </div>
 diff --git a/apps/web/vite.config.ts b/apps/web/vite.config.ts
-index dda4d1d2a8180d557922033c1915fd13b010da13..82b5d8decbfd3a96cf75b404f420b15e91648d1c 100644
+index a0c94997a3574b94edbcd14095f12ddeb865860d..82568d579747ab55b42ef0c11d0ce80859b2c6fb 100644
 --- a/apps/web/vite.config.ts
 +++ b/apps/web/vite.config.ts
-@@ -289,6 +289,23 @@ function bootstrapTitlePlugin(): Plugin {
+@@ -296,6 +296,23 @@ function bootstrapTitlePlugin(): Plugin {
    };
  }
  
@@ -101,7 +104,7 @@ index dda4d1d2a8180d557922033c1915fd13b010da13..82b5d8decbfd3a96cf75b404f420b15e
  // Allow Tailnet hosts for sharing; Tailscale-controlled DNS prevents attacker rebinding.
  const configuredAllowedHosts = (process.env.T3CODE_DEV_ALLOWED_HOSTS ?? "")
    .split(",")
-@@ -316,6 +333,7 @@ export default defineConfig(({ command }) => {
+@@ -323,6 +340,7 @@ export default defineConfig(({ command }) => {
      },
      assetsInclude: ["**/*.wasm"],
      plugins: [
@@ -110,10 +113,10 @@ index dda4d1d2a8180d557922033c1915fd13b010da13..82b5d8decbfd3a96cf75b404f420b15e
        devCompressionPlugin(),
        chunkCycleGuardPlugin(),
 diff --git a/scripts/build-desktop-artifact.ts b/scripts/build-desktop-artifact.ts
-index 2410a77ec15ac32bf54dc244ef294136e83a8834..906bf8b65c5497767cc1d61223caf918cf46ed49 100644
+index 1b89ab6754fe306104063e2404c695ddeaf55724..03390c19129e33cd3f22370b311c8dd9c936a47a 100644
 --- a/scripts/build-desktop-artifact.ts
 +++ b/scripts/build-desktop-artifact.ts
-@@ -3005,9 +3005,35 @@ export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
+@@ -3042,9 +3042,35 @@ export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
      buildConfig.win = winConfig;
    }
  

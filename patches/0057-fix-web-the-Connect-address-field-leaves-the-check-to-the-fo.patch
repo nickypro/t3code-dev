@@ -1,0 +1,27 @@
+diff --git a/apps/web/src/components/settings/ConnectServiceSettings.browser.test.tsx b/apps/web/src/components/settings/ConnectServiceSettings.browser.test.tsx
+index 8e75120f4c683f4b47da287e37d507f99438768c..3090ee8f372dc8700c7ac15e40e01e9c3ab99ca1 100644
+--- a/apps/web/src/components/settings/ConnectServiceSettings.browser.test.tsx
++++ b/apps/web/src/components/settings/ConnectServiceSettings.browser.test.tsx
+@@ -68,7 +68,8 @@ it("opens the sign-in values when the relay publishes none, and saves nothing",
+   const { props, calls } = setup({ _tag: "NotPublished" });
+   await using screen = await render(<ConnectServiceForm {...props} />);
+ 
+-  await screen.getByRole("textbox", { name: "Connect address" }).fill("https://relay.example.test");
++  // Not a URL to the browser either: the form's own check must still be the one that answers.
++  await screen.getByRole("textbox", { name: "Connect address" }).fill("relay.example.test");
+   await screen.getByRole("button", { name: "Save" }).click();
+ 
+   await expect
+diff --git a/apps/web/src/components/settings/ConnectServiceSettings.tsx b/apps/web/src/components/settings/ConnectServiceSettings.tsx
+index b023a1289423dacd5163a48695e70e5c748c80d1..fb327baad8b6dcb366ad49687c5300a254a2c91f 100644
+--- a/apps/web/src/components/settings/ConnectServiceSettings.tsx
++++ b/apps/web/src/components/settings/ConnectServiceSettings.tsx
+@@ -173,6 +173,8 @@ export function ConnectServiceForm({
+         }
+       >
+         <form
++          // The address is checked on save, with a message that says what to fix.
++          noValidate
+           className="flex flex-wrap items-center gap-2 pt-3 pb-2"
+           onSubmit={(event) => {
+             event.preventDefault();

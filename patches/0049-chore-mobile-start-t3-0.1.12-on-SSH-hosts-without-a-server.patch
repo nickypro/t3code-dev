@@ -1,0 +1,13 @@
+diff --git a/apps/mobile/src/connection/ssh/gateway.ts b/apps/mobile/src/connection/ssh/gateway.ts
+index ec3f72c1e076d59243f9188ba2da142016395cac..0583fbdf77dfa4335788574edb0d441c0110896f 100644
+--- a/apps/mobile/src/connection/ssh/gateway.ts
++++ b/apps/mobile/src/connection/ssh/gateway.ts
+@@ -37,7 +37,7 @@ import { parseSshConfig, resolveSshHost } from "./sshConfig";
+  * The t3 release a host is given when it has no server running yet. The desktop passes its
+  * own version here; keep this in step with the server version this build is paired with.
+  */
+-export const REMOTE_T3_VERSION = "0.1.2";
++export const REMOTE_T3_VERSION = "0.1.12";
+ 
+ export interface SshGatewayDependencies {
+   readonly native: SshNative;

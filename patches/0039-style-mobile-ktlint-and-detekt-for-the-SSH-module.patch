@@ -1,0 +1,695 @@
+diff --git a/apps/mobile/modules/t3-ssh/android/src/main/java/expo/modules/t3ssh/KnownHosts.kt b/apps/mobile/modules/t3-ssh/android/src/main/java/expo/modules/t3ssh/KnownHosts.kt
+index 62928912daf93a5b89c47c5b8c451e5804341976..ad21e84bb4e04666f57f00e48e1086d59437466e 100644
+--- a/apps/mobile/modules/t3-ssh/android/src/main/java/expo/modules/t3ssh/KnownHosts.kt
++++ b/apps/mobile/modules/t3-ssh/android/src/main/java/expo/modules/t3ssh/KnownHosts.kt
+@@ -21,22 +21,18 @@ object KnownHosts {
+   fun parse(text: String): List<KnownHost> = text.lineSequence().mapNotNull(::parseLine).toList()
+ 
+   fun parseLine(raw: String): KnownHost? {
+-    val line = raw.trim()
+-    if (line.isEmpty() || line.startsWith("#") || line.startsWith("@") || line.startsWith("|")) {
+-      return null
+-    }
+-    val fields = line.split(Regex("\\s+"))
+-    if (fields.size < 3) return null
+-    val names = fields[0].split(",").filter { it.isNotEmpty() }
+-    if (names.isEmpty() || names.any { it.startsWith("|") || it.contains('*') || it.contains('?') }) {
+-      return null
+-    }
+-    val blob = try {
+-      Base64.getDecoder().decode(fields[2])
+-    } catch (_: IllegalArgumentException) {
+-      return null
+-    }
+-    if (blob.isEmpty()) return null
+-    return KnownHost(names, fields[1], fields[2])
++    val fields = raw.trim().split(WHITESPACE)
++    if (fields.size < 3 || !isPlainNameList(fields[0])) return null
++    val blob = runCatching { Base64.getDecoder().decode(fields[2]) }.getOrNull()
++    val entry = KnownHost(fields[0].split(","), fields[1], fields[2])
++    return entry.takeIf { blob?.isNotEmpty() == true }
+   }
++
++  // Comments, `@` markers, hashed `|1|` names and patterns could match a host other than the
++  // one the user trusted, so only plain names count.
++  private fun isPlainNameList(field: String): Boolean = field.split(",").all { name ->
++    name.isNotEmpty() && name[0] !in "#@|" && name.none { it in "*?!" }
++  }
++
++  private val WHITESPACE = Regex("\\s+")
+ }
+diff --git a/apps/mobile/modules/t3-ssh/android/src/main/java/expo/modules/t3ssh/SshKeys.kt b/apps/mobile/modules/t3-ssh/android/src/main/java/expo/modules/t3ssh/SshKeys.kt
+index 6f8a9dcdd24ee50ff88828512aab0b3b80e62f00..2c4cec09508fab8e79d435856bc635aa8428c83d 100644
+--- a/apps/mobile/modules/t3-ssh/android/src/main/java/expo/modules/t3ssh/SshKeys.kt
++++ b/apps/mobile/modules/t3-ssh/android/src/main/java/expo/modules/t3ssh/SshKeys.kt
+@@ -78,7 +78,10 @@ class Ed25519Key(seed: ByteArray) {
+ 
+ /** OpenSSH's `SHA256:` fingerprint of a public key blob. */
+ fun sshFingerprint(blob: ByteArray): String =
+-  "SHA256:" + Base64.getEncoder().withoutPadding().encodeToString(MessageDigest.getInstance("SHA-256").digest(blob))
++  "SHA256:" +
++    Base64.getEncoder().withoutPadding().encodeToString(
++      MessageDigest.getInstance("SHA-256").digest(blob)
++    )
+ 
+ private fun sshStrings(vararg values: ByteArray): ByteArray {
+   val bytes = ByteArrayOutputStream()
+diff --git a/apps/mobile/modules/t3-ssh/android/src/main/java/expo/modules/t3ssh/SshSession.kt b/apps/mobile/modules/t3-ssh/android/src/main/java/expo/modules/t3ssh/SshSession.kt
+index 7986b062de6ea4f4232fbfe77e7c5a93ad00bd2f..73030262c21ab92b35b2d1770b2f5fb3ccf1f1a1 100644
+--- a/apps/mobile/modules/t3-ssh/android/src/main/java/expo/modules/t3ssh/SshSession.kt
++++ b/apps/mobile/modules/t3-ssh/android/src/main/java/expo/modules/t3ssh/SshSession.kt
+@@ -28,7 +28,7 @@ data class SshHop(
+   val host: String,
+   val port: Int,
+   val user: String,
+-  val hostKeyAlias: String? = null,
++  val hostKeyAlias: String? = null
+ ) {
+   /** The known_hosts name this hop's key is checked under. */
+   val knownHostsName: String
+@@ -39,7 +39,7 @@ data class SshOptions(
+   val connectTimeoutMs: Int = 15_000,
+   // Matches the desktop's ServerAliveInterval=15 / ServerAliveCountMax=3.
+   val keepAliveSeconds: Int = 15,
+-  val keepAliveMaxCount: Int = 3,
++  val keepAliveMaxCount: Int = 3
+ )
+ 
+ data class ExecResult(val exitCode: Int?, val stdout: String, val stderr: String)
+@@ -51,7 +51,7 @@ data class HostKeyRejection(
+   val keyBase64: String,
+   val fingerprint: String,
+   /** known_hosts already holds a different key under this name. */
+-  val changed: Boolean,
++  val changed: Boolean
+ ) {
+   val knownHostsLine: String get() = "${hop.knownHostsName} $keyType $keyBase64"
+ }
+@@ -149,39 +149,51 @@ class SshSession private constructor(private val clients: List<SSHClient>) : Clo
+       hops: List<SshHop>,
+       key: KeyPair,
+       knownHosts: List<KnownHost>,
+-      options: SshOptions = SshOptions(),
++      options: SshOptions = SshOptions()
+     ): SshConnectResult {
+       require(hops.isNotEmpty()) { "An SSH connection needs at least one host." }
+       SshCrypto.ensureBouncyCastle()
+       val clients = ArrayList<SSHClient>(hops.size)
++      var handedOver = false
+       try {
+-        for ((index, hop) in hops.withIndex()) {
++        for (hop in hops) {
+           val verifier = PinnedHostKeyVerifier(hop.knownHostsName, knownHosts)
+           val client = newClient(options, verifier)
+-          try {
+-            if (index == 0) {
+-              client.connect(hop.host, hop.port)
+-            } else {
+-              client.connectVia(clients.last().newDirectConnection(hop.host, hop.port), hop.host, hop.port)
+-            }
+-          } catch (error: IOException) {
+-            closeQuietly(client)
+-            val rejection = verifier.rejection(hop) ?: throw error
+-            closeAll(clients)
+-            return SshConnectResult.Rejected(rejection)
+-          }
++          val rejection = connectHop(client, hop, clients.lastOrNull(), verifier)
++          if (rejection != null) return SshConnectResult.Rejected(rejection)
+           clients += client
+           client.authPublickey(hop.user, KeyPairWrapper(key))
+         }
+-      } catch (error: Throwable) {
+-        closeAll(clients)
+-        throw error
++        val session = SshSession(clients)
++        for (client in clients) {
++          client.transport.disconnectListener =
++            DisconnectListener { _, _ -> session.onTransportDeath() }
++        }
++        handedOver = true
++        return SshConnectResult.Connected(session)
++      } finally {
++        if (!handedOver) closeAll(clients)
+       }
+-      val session = SshSession(clients)
+-      for (client in clients) {
+-        client.transport.disconnectListener = DisconnectListener { _, _ -> session.onTransportDeath() }
++    }
++
++    /** Opens the transport to `hop`, through `via` when there is one; null once verified. */
++    private fun connectHop(
++      client: SSHClient,
++      hop: SshHop,
++      via: SSHClient?,
++      verifier: PinnedHostKeyVerifier
++    ): HostKeyRejection? {
++      try {
++        if (via == null) {
++          client.connect(hop.host, hop.port)
++        } else {
++          client.connectVia(via.newDirectConnection(hop.host, hop.port), hop.host, hop.port)
++        }
++        return null
++      } catch (error: IOException) {
++        closeQuietly(client)
++        return verifier.rejection(hop) ?: throw error
+       }
+-      return SshConnectResult.Connected(session)
+     }
+ 
+     /** Drops SHA-1, MD5, CBC, 3DES/RC4/Blowfish and DSA, which no OpenSSH since 7.4 needs. */
+@@ -228,7 +240,7 @@ class SshSession private constructor(private val clients: List<SSHClient>) : Clo
+ /** Accepts exactly the keys known_hosts lists under one name and remembers what it saw. */
+ private class PinnedHostKeyVerifier(
+   private val name: String,
+-  knownHosts: List<KnownHost>,
++  knownHosts: List<KnownHost>
+ ) : HostKeyVerifier {
+   private val entries = knownHosts.filter { it.matches(name) }
+ 
+@@ -246,12 +258,13 @@ private class PinnedHostKeyVerifier(
+ 
+   // Lets sshj negotiate the key type already on file, as OpenSSH does.
+   override fun findExistingAlgorithms(hostname: String, port: Int): List<String> =
+-    entries.flatMap { if (it.keyType == "ssh-rsa") listOf("rsa-sha2-512", "rsa-sha2-256") else listOf(it.keyType) }
+-      .distinct()
++    entries.flatMap { algorithmsFor(it.keyType) }.distinct()
++
++  private fun algorithmsFor(keyType: String) =
++    if (keyType == "ssh-rsa") listOf("rsa-sha2-512", "rsa-sha2-256") else listOf(keyType)
+ 
+   fun rejection(hop: SshHop): HostKeyRejection? {
+-    val key = presented ?: return null
+-    if (accepted) return null
++    val key = presented?.takeUnless { accepted } ?: return null
+     val blob = blobOf(key)
+     return HostKeyRejection(
+       hop = hop,
+diff --git a/apps/mobile/modules/t3-ssh/android/src/main/java/expo/modules/t3ssh/SshStore.kt b/apps/mobile/modules/t3-ssh/android/src/main/java/expo/modules/t3ssh/SshStore.kt
+index 3102436637b32e0bebd7ea53ebf132007732fea4..eb12d2f9ac6ec3d03ccb5c8d1d0b718bb80c879e 100644
+--- a/apps/mobile/modules/t3-ssh/android/src/main/java/expo/modules/t3ssh/SshStore.kt
++++ b/apps/mobile/modules/t3-ssh/android/src/main/java/expo/modules/t3ssh/SshStore.kt
+@@ -41,22 +41,20 @@ class SshStore(private val dir: File, private val sealer: SeedSealer) {
+   /** Adds an entry. A name that already has a different key must be forgotten first. */
+   @Synchronized
+   fun trust(line: String) {
+-    val entry = KnownHosts.parseLine(line) ?: throw IllegalArgumentException("Not a known_hosts line.")
++    val entry = requireNotNull(KnownHosts.parseLine(line)) { "Not a known_hosts line." }
+     val current = knownHosts()
+-    if (current.any { it.keyType == entry.keyType && it.keyBase64 == entry.keyBase64 && it.names == entry.names }) {
+-      return
+-    }
++    if (entry in current) return
+     val clash = current.firstOrNull { known -> entry.names.any(known::matches) }
+-    if (clash != null) {
+-      throw IllegalStateException("${clash.names.first()} already has a different trusted key. Remove it first.")
++    check(clash == null) {
++      "${clash?.names?.first()} already has a different trusted key. Remove it first."
+     }
+-    writeAtomically(knownHostsFile, (current + entry).joinToString("") { it.line + "\n" })
++    saveKnownHosts(current + entry)
+   }
+ 
+   @Synchronized
+   fun forget(line: String) {
+     val entry = KnownHosts.parseLine(line) ?: return
+-    writeAtomically(knownHostsFile, knownHosts().filter { it != entry }.joinToString("") { it.line + "\n" })
++    saveKnownHosts(knownHosts() - entry)
+   }
+ 
+   @Synchronized
+@@ -90,6 +88,9 @@ class SshStore(private val dir: File, private val sealer: SeedSealer) {
+     sealer.forget()
+   }
+ 
++  private fun saveKnownHosts(entries: List<KnownHost>) =
++    writeAtomically(knownHostsFile, entries.joinToString("") { "${it.line}\n" })
++
+   private fun File.readOrEmpty(): String = if (exists()) readText() else ""
+ 
+   private fun writeAtomically(file: File, text: String) = writeAtomically(file, text.toByteArray())
+@@ -132,7 +133,10 @@ object KeystoreSealer : SeedSealer {
+     (keyStore().getKey(ALIAS, null) as? SecretKey)?.let { return it }
+     val generator = KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_AES, "AndroidKeyStore")
+     generator.init(
+-      KeyGenParameterSpec.Builder(ALIAS, KeyProperties.PURPOSE_ENCRYPT or KeyProperties.PURPOSE_DECRYPT)
++      KeyGenParameterSpec.Builder(
++        ALIAS,
++        KeyProperties.PURPOSE_ENCRYPT or KeyProperties.PURPOSE_DECRYPT
++      )
+         .setBlockModes(KeyProperties.BLOCK_MODE_GCM)
+         .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE)
+         .setKeySize(256)
+diff --git a/apps/mobile/modules/t3-ssh/android/src/main/java/expo/modules/t3ssh/T3SshModule.kt b/apps/mobile/modules/t3-ssh/android/src/main/java/expo/modules/t3ssh/T3SshModule.kt
+index 94e4c5d90feafbb36e22bb0136a095586ac322de..cfb6c5c5852aa9a3e473605263cd0137d34b26f5 100644
+--- a/apps/mobile/modules/t3-ssh/android/src/main/java/expo/modules/t3ssh/T3SshModule.kt
++++ b/apps/mobile/modules/t3-ssh/android/src/main/java/expo/modules/t3ssh/T3SshModule.kt
+@@ -9,12 +9,15 @@ import expo.modules.kotlin.records.Field
+ import expo.modules.kotlin.records.Record
+ import kotlinx.coroutines.Dispatchers
+ import kotlinx.coroutines.withContext
++import net.schmizz.sshj.common.SSHRuntimeException
+ import net.schmizz.sshj.userauth.UserAuthException
+ import java.io.File
++import java.io.IOException
+ import java.net.ConnectException
+ import java.net.NoRouteToHostException
+ import java.net.SocketTimeoutException
+ import java.net.UnknownHostException
++import java.security.GeneralSecurityException
+ import java.util.Base64
+ import java.util.UUID
+ import java.util.concurrent.ConcurrentHashMap
+@@ -41,6 +44,9 @@ class T3SshModule : Module() {
+     SshStore(File(context.noBackupFilesDir, "t3-ssh"), KeystoreSealer)
+   }
+ 
++  // Expo only picks the zero-argument Coroutine overload when the empty arrow is written out,
++  // and ktlint's function-literal rule removes it.
++  @Suppress("ktlint:standard:function-literal")
+   override fun definition() = ModuleDefinition {
+     Name("T3Ssh")
+ 
+@@ -49,38 +55,45 @@ class T3SshModule : Module() {
+       sessions.clear()
+     }
+ 
+-    AsyncFunction("getPublicKey") Coroutine { -> io { store.publicKeyLine()?.let(::publicKeyInfo) } }
++    AsyncFunction("getPublicKey") Coroutine { ->
++      io { store.publicKeyLine()?.let(::publicKeyInfo) }
++    }
+ 
+-    AsyncFunction("createKey") Coroutine { comment: String -> io { publicKeyInfo(store.createKey(comment)) } }
++    AsyncFunction("createKey") Coroutine { comment: String ->
++      io { publicKeyInfo(store.createKey(comment)) }
++    }
+ 
+-    AsyncFunction("deleteKey") Coroutine { -> io { store.deleteKey() } }
++    AsyncFunction("deleteKey") Coroutine { ->
++      io { store.deleteKey() }
++    }
+ 
+-    AsyncFunction("readConfig") Coroutine { -> io { store.readConfig() } }
++    AsyncFunction("readConfig") Coroutine { ->
++      io { store.readConfig() }
++    }
+ 
+-    AsyncFunction("writeConfig") Coroutine { text: String -> io { store.writeConfig(text) } }
++    AsyncFunction("writeConfig") Coroutine { text: String ->
++      io { store.writeConfig(text) }
++    }
+ 
+     AsyncFunction("listKnownHosts") Coroutine { ->
+-      io {
+-        store.knownHosts().map { entry ->
+-          mapOf(
+-            "line" to entry.line,
+-            "names" to entry.names,
+-            "keyType" to entry.keyType,
+-            "fingerprint" to sshFingerprint(Base64.getDecoder().decode(entry.keyBase64)),
+-          )
+-        }
+-      }
++      io { store.knownHosts().map(::knownHostInfo) }
+     }
+ 
+-    AsyncFunction("trustHostKey") Coroutine { line: String -> io { store.trust(line) } }
++    AsyncFunction("trustHostKey") Coroutine { line: String ->
++      io { store.trust(line) }
++    }
+ 
+-    AsyncFunction("forgetHostKey") Coroutine { line: String -> io { store.forget(line) } }
++    AsyncFunction("forgetHostKey") Coroutine { line: String ->
++      io { store.forget(line) }
++    }
+ 
+-    AsyncFunction("connect") Coroutine { hops: List<SshHopRecord> -> io { connect(hops) } }
++    AsyncFunction("connect") Coroutine { hops: List<SshHopRecord> ->
++      io { connect(hops) }
++    }
+ 
+-    AsyncFunction("exec") Coroutine { sessionId: String, command: String, stdin: String, timeoutMs: Double ->
++    AsyncFunction("exec") Coroutine { id: String, command: String, stdin: String, ms: Double ->
+       io {
+-        val result = session(sessionId).exec(command, stdin, timeoutMs.toLong())
++        val result = session(id).exec(command, stdin, ms.toLong())
+         mapOf("exitCode" to result.exitCode, "stdout" to result.stdout, "stderr" to result.stderr)
+       }
+     }
+@@ -91,11 +104,14 @@ class T3SshModule : Module() {
+ 
+     Function("isOpen") { sessionId: String -> sessions[sessionId]?.isOpen == true }
+ 
+-    AsyncFunction("close") Coroutine { sessionId: String -> io { sessions.remove(sessionId)?.close() } }
++    AsyncFunction("close") Coroutine { sessionId: String ->
++      io { sessions.remove(sessionId)?.close() }
++    }
+   }
+ 
+   private fun connect(hops: List<SshHopRecord>): Map<String, Any?> {
+-    val key = store.key() ?: throw CodedException("ERR_SSH_NO_KEY", "Create an SSH key first.", null)
++    val key =
++      store.key() ?: throw CodedException("ERR_SSH_NO_KEY", "Create an SSH key first.", null)
+     sessions.entries.removeIf { (_, session) ->
+       val dead = !session.isOpen
+       if (dead) session.close()
+@@ -131,6 +147,13 @@ class T3SshModule : Module() {
+     sessions[id]?.takeIf { it.isOpen }
+       ?: throw CodedException("ERR_SSH_SESSION_CLOSED", "The SSH connection closed.", null)
+ 
++  private fun knownHostInfo(entry: KnownHost): Map<String, Any> = mapOf(
++    "line" to entry.line,
++    "names" to entry.names,
++    "keyType" to entry.keyType,
++    "fingerprint" to sshFingerprint(Base64.getDecoder().decode(entry.keyBase64)),
++  )
++
+   private fun publicKeyInfo(line: String): Map<String, String> {
+     val blob = Base64.getDecoder().decode(line.split(Regex("\\s+"))[1])
+     return mapOf("line" to line, "fingerprint" to sshFingerprint(blob))
+@@ -139,18 +162,32 @@ class T3SshModule : Module() {
+   private suspend fun <T> io(block: () -> T): T = withContext(Dispatchers.IO) {
+     try {
+       block()
+-    } catch (error: CodedException) {
+-      throw error
+     } catch (error: UserAuthException) {
+       throw CodedException("ERR_SSH_AUTH", "The server did not accept this device's key.", error)
+-    } catch (error: Exception) {
+-      val unreachable = error is UnknownHostException || error is ConnectException ||
+-        error is NoRouteToHostException || error is SocketTimeoutException
+-      throw CodedException(
+-        if (unreachable) "ERR_SSH_UNREACHABLE" else "ERR_SSH",
+-        error.message ?: error.javaClass.simpleName,
+-        error,
+-      )
++    } catch (error: UnknownHostException) {
++      throw unreachable(error)
++    } catch (error: ConnectException) {
++      throw unreachable(error)
++    } catch (error: NoRouteToHostException) {
++      throw unreachable(error)
++    } catch (error: SocketTimeoutException) {
++      throw unreachable(error)
++    } catch (error: IOException) {
++      throw failure(error)
++    } catch (error: GeneralSecurityException) {
++      throw failure(error)
++    } catch (error: SSHRuntimeException) {
++      throw failure(error)
++    } catch (error: IllegalArgumentException) {
++      throw failure(error)
++    } catch (error: IllegalStateException) {
++      throw failure(error)
+     }
+   }
++
++  private fun unreachable(error: Exception) =
++    CodedException("ERR_SSH_UNREACHABLE", error.message ?: error.javaClass.simpleName, error)
++
++  private fun failure(error: Exception) =
++    CodedException("ERR_SSH", error.message ?: error.javaClass.simpleName, error)
+ }
+diff --git a/apps/mobile/modules/t3-ssh/android/src/test/java/expo/modules/t3ssh/KnownHostsTest.kt b/apps/mobile/modules/t3-ssh/android/src/test/java/expo/modules/t3ssh/KnownHostsTest.kt
+index 1c551583d9914681b7b21627aa47a7959198f051..4d7a400997add5a9492e9f648b1232339ce681ff 100644
+--- a/apps/mobile/modules/t3-ssh/android/src/test/java/expo/modules/t3ssh/KnownHostsTest.kt
++++ b/apps/mobile/modules/t3-ssh/android/src/test/java/expo/modules/t3ssh/KnownHostsTest.kt
+@@ -23,7 +23,10 @@ class KnownHostsTest {
+       """.trimIndent(),
+     )
+ 
+-    assertEquals(listOf(KnownHost(listOf("example.com", "[10.0.0.1]:2222"), "ssh-ed25519", key)), entries)
++    assertEquals(
++      listOf(KnownHost(listOf("example.com", "[10.0.0.1]:2222"), "ssh-ed25519", key)),
++      entries
++    )
+     assertEquals(true, entries.single().matches("[10.0.0.1]:2222"))
+   }
+ 
+diff --git a/apps/mobile/modules/t3-ssh/android/src/test/java/expo/modules/t3ssh/SshSessionTest.kt b/apps/mobile/modules/t3-ssh/android/src/test/java/expo/modules/t3ssh/SshSessionTest.kt
+index 847cc9007243888c1ef5760682ad1fa88a9ba1f6..8d7a75c8862e5a4ab9fba02378dd75b41bc43603 100644
+--- a/apps/mobile/modules/t3-ssh/android/src/test/java/expo/modules/t3ssh/SshSessionTest.kt
++++ b/apps/mobile/modules/t3-ssh/android/src/test/java/expo/modules/t3ssh/SshSessionTest.kt
+@@ -41,7 +41,11 @@ class SshSessionTest {
+     val server = sshd()
+     val session = connected(listOf(hop(server)), listOf(server.knownHost()))
+ 
+-    val result = session.exec("sh -s -- first", "echo \"out \$1\"; echo err >&2; cat; exit 3\nrest of stdin\n", 10_000)
++    val result = session.exec(
++      "sh -s -- first",
++      "echo \"out \$1\"; echo err >&2; cat; exit 3\nrest of stdin\n",
++      10_000
++    )
+ 
+     assertEquals(3, result.exitCode)
+     assertEquals("out first\n", result.stdout)
+@@ -54,10 +58,20 @@ class SshSessionTest {
+ 
+     val rejection = rejected(listOf(hop(server)), emptyList())
+ 
+-    val keygen = run("ssh-keygen", "-l", "-E", "sha256", "-f", server.hostKeyPublicFile.path).split(" ")[1]
++    val keygen = run(
++      "ssh-keygen",
++      "-l",
++      "-E",
++      "sha256",
++      "-f",
++      server.hostKeyPublicFile.path
++    ).split(" ")[1]
+     assertEquals(keygen, rejection.fingerprint)
+     assertFalse(rejection.changed)
+-    assertEquals("[127.0.0.1]:${server.port} ${server.hostKeyType} ${server.hostKeyBase64}", rejection.knownHostsLine)
++    assertEquals(
++      "[127.0.0.1]:${server.port} ${server.hostKeyType} ${server.hostKeyBase64}",
++      rejection.knownHostsLine
++    )
+   }
+ 
+   @Test
+@@ -94,7 +108,11 @@ class SshSessionTest {
+     assertNotEquals(0, onJump.exec("echo shell", "", 10_000).exitCode)
+     val elsewhere = freeLoopbackPort()
+     assertThrows(IOException::class.java) {
+-      SshSession.connect(listOf(hop(jump), SshHop("127.0.0.1", elsewhere, TestSshd.user)), key.toKeyPair(), known)
++      SshSession.connect(
++        listOf(hop(jump), SshHop("127.0.0.1", elsewhere, TestSshd.user)),
++        key.toKeyPair(),
++        known
++      )
+     }
+   }
+ 
+@@ -155,11 +173,25 @@ class SshSessionTest {
+ 
+   @Test
+   fun weakAlgorithmsAreNotOffered() {
+-    for (weak in listOf("hmac-sha1", "diffie-hellman-group14-sha1", "aes128-cbc", "ssh-rsa", "ssh-dss", "3des-cbc")) {
++    for (weak in listOf(
++      "hmac-sha1",
++      "diffie-hellman-group14-sha1",
++      "aes128-cbc",
++      "ssh-rsa",
++      "ssh-dss",
++      "3des-cbc"
++    )) {
+       assertFalse(weak, SshSession.isAllowedAlgorithm(weak))
+     }
+-    for (modern in listOf("curve25519-sha256", "chacha20-poly1305@openssh.com", "aes256-gcm@openssh.com",
+-      "hmac-sha2-256-etm@openssh.com", "ssh-ed25519", "rsa-sha2-512", "ecdh-sha2-nistp256")) {
++    for (modern in listOf(
++      "curve25519-sha256",
++      "chacha20-poly1305@openssh.com",
++      "aes256-gcm@openssh.com",
++      "hmac-sha2-256-etm@openssh.com",
++      "ssh-ed25519",
++      "rsa-sha2-512",
++      "ecdh-sha2-nistp256"
++    )) {
+       assertTrue(modern, SshSession.isAllowedAlgorithm(modern))
+     }
+   }
+@@ -167,12 +199,24 @@ class SshSessionTest {
+   private fun sshd(authorized: String = key.publicKeyLine("test"), extra: String = "") =
+     TestSshd(tmp.newFolder(), authorized, extra).also(cleanup::add)
+ 
+-  private fun tunnelOnly(targetPort: Int) =
+-    "restrict,port-forwarding,permitopen=\"127.0.0.1:$targetPort\",command=\"/bin/false\" ${key.publicKeyLine("jump")}"
+-
+-  private fun hop(server: TestSshd, alias: String? = null) = SshHop("127.0.0.1", server.port, TestSshd.user, alias)
++  private fun tunnelOnly(targetPort: Int): String {
++    val options = "restrict,port-forwarding," +
++      "permitopen=\"127.0.0.1:$targetPort\",command=\"/bin/false\""
++    return "$options ${key.publicKeyLine("jump")}"
++  }
+ 
+-  private fun connected(hops: List<SshHop>, known: List<KnownHost>, options: SshOptions = SshOptions()): SshSession {
++  private fun hop(server: TestSshd, alias: String? = null) = SshHop(
++    "127.0.0.1",
++    server.port,
++    TestSshd.user,
++    alias
++  )
++
++  private fun connected(
++    hops: List<SshHop>,
++    known: List<KnownHost>,
++    options: SshOptions = SshOptions()
++  ): SshSession {
+     val result = SshSession.connect(hops, key.toKeyPair(), known, options)
+     check(result is SshConnectResult.Connected) { "expected a connection, got $result" }
+     cleanup += result.session
+diff --git a/apps/mobile/modules/t3-ssh/android/src/test/java/expo/modules/t3ssh/SshStoreTest.kt b/apps/mobile/modules/t3-ssh/android/src/test/java/expo/modules/t3ssh/SshStoreTest.kt
+index 2436bf01189bdb0043269e3e48c6493d16500a5c..c72020c3969386d84d87bb814791debcffcda51e 100644
+--- a/apps/mobile/modules/t3-ssh/android/src/test/java/expo/modules/t3ssh/SshStoreTest.kt
++++ b/apps/mobile/modules/t3-ssh/android/src/test/java/expo/modules/t3ssh/SshStoreTest.kt
+@@ -25,7 +25,9 @@ class SshStoreTest {
+       mask = 0x11
+     }
+ 
+-    private fun xor(bytes: ByteArray) = ByteArray(bytes.size) { (bytes[it].toInt() xor mask.toInt()).toByte() }
++    private fun xor(bytes: ByteArray) = ByteArray(bytes.size) {
++      (bytes[it].toInt() xor mask.toInt()).toByte()
++    }
+   }
+ 
+   private val sealer = XorSealer()
+diff --git a/apps/mobile/modules/t3-ssh/android/src/test/java/expo/modules/t3ssh/T3ServerEndToEndTest.kt b/apps/mobile/modules/t3-ssh/android/src/test/java/expo/modules/t3ssh/T3ServerEndToEndTest.kt
+index 9b1df2f89bec8d957b42e6c07f08b42f00126229..b2935466c50098831615f724b504231a983c3e6f 100644
+--- a/apps/mobile/modules/t3-ssh/android/src/test/java/expo/modules/t3ssh/T3ServerEndToEndTest.kt
++++ b/apps/mobile/modules/t3-ssh/android/src/test/java/expo/modules/t3ssh/T3ServerEndToEndTest.kt
+@@ -37,23 +37,34 @@ class T3ServerEndToEndTest {
+   fun theDesktopScriptsStartAPairableServerThroughAJumpHost() {
+     val scripts = System.getenv("T3_SSH_E2E_SCRIPTS")?.let(::File)
+     val home = System.getenv("T3_SSH_E2E_HOME")
+-    assumeTrue("set T3_SSH_E2E_SCRIPTS and T3_SSH_E2E_HOME", scripts != null && home != null && TestSshd.available)
++    assumeTrue(
++      "set T3_SSH_E2E_SCRIPTS and T3_SSH_E2E_HOME",
++      scripts != null && home != null && TestSshd.available
++    )
+     scripts!!
+     val stateKey = File(scripts, "state-key").readText().trim()
+ 
+-    val target = sshd("environment=\"HOME=$home\" ${key.publicKeyLine("e2e")}", "PermitUserEnvironment yes")
++    val target =
++      sshd("environment=\"HOME=$home\" ${key.publicKeyLine("e2e")}", "PermitUserEnvironment yes")
+     val jump = sshd(
+       "restrict,port-forwarding,permitopen=\"127.0.0.1:${target.port}\",command=\"/bin/false\" " +
+         key.publicKeyLine("e2e jump"),
+     )
+     val result = SshSession.connect(
+-      listOf(SshHop("127.0.0.1", jump.port, TestSshd.user), SshHop("127.0.0.1", target.port, TestSshd.user)),
++      listOf(
++        SshHop("127.0.0.1", jump.port, TestSshd.user),
++        SshHop("127.0.0.1", target.port, TestSshd.user)
++      ),
+       key.toKeyPair(),
+       listOf(jump.knownHost(), target.knownHost()),
+     )
+     val session = (result as SshConnectResult.Connected).session.also(cleanup::add)
+ 
+-    val launch = session.exec("sh -l -s -- $stateKey", File(scripts, "launch.sh").readText(), LAUNCH_TIMEOUT_MS)
++    val launch = session.exec(
++      "sh -l -s -- $stateKey",
++      File(scripts, "launch.sh").readText(),
++      LAUNCH_TIMEOUT_MS
++    )
+     assertEquals(launch.stderr, 0, launch.exitCode)
+     val remotePort = field(launch.stdout, "remotePort").toInt()
+     try {
+@@ -78,7 +89,11 @@ class T3ServerEndToEndTest {
+       assertTrue(sessionState, sessionState.contains("\"authenticated\":true"))
+ 
+       // A second launch finds the running server instead of starting another.
+-      val again = session.exec("sh -l -s -- $stateKey", File(scripts, "launch.sh").readText(), LAUNCH_TIMEOUT_MS)
++      val again = session.exec(
++        "sh -l -s -- $stateKey",
++        File(scripts, "launch.sh").readText(),
++        LAUNCH_TIMEOUT_MS
++      )
+       assertEquals(remotePort, field(again.stdout, "remotePort").toInt())
+     } finally {
+       session.exec("sh -s", File(scripts, "stop.sh").readText(), 60_000)
+@@ -92,7 +107,12 @@ class T3ServerEndToEndTest {
+     Regex("\"$name\"\\s*:\\s*\"?([^\",}]+)").find(json)?.groupValues?.get(1)
+       ?: throw AssertionError("no $name in: $json")
+ 
+-  private fun http(port: Int, path: String, form: Map<String, String>? = null, bearer: String? = null): String {
++  private fun http(
++    port: Int,
++    path: String,
++    form: Map<String, String>? = null,
++    bearer: String? = null
++  ): String {
+     val connection = URL("http://127.0.0.1:$port$path").openConnection() as HttpURLConnection
+     connection.connectTimeout = 10_000
+     connection.readTimeout = 30_000
+@@ -104,7 +124,13 @@ class T3ServerEndToEndTest {
+       val body = form.entries.joinToString("&") { (k, v) -> "$k=${URLEncoder.encode(v, "UTF-8")}" }
+       connection.outputStream.use { it.write(body.toByteArray()) }
+     }
+-    val stream = if (connection.responseCode < 400) connection.inputStream else connection.errorStream
++    val stream = if (connection.responseCode <
++      400
++    ) {
++      connection.inputStream
++    } else {
++      connection.errorStream
++    }
+     val text = stream.use { it.readBytes().decodeToString() }
+     check(connection.responseCode < 400) { "$path answered ${connection.responseCode}: $text" }
+     return text
+diff --git a/apps/mobile/modules/t3-ssh/android/src/test/java/expo/modules/t3ssh/TestServers.kt b/apps/mobile/modules/t3-ssh/android/src/test/java/expo/modules/t3ssh/TestServers.kt
+index 2cdc387cd80732931c3adff818af15a8b5148004..1351e252e9aa90b51e36ca283760be612c60fb23 100644
+--- a/apps/mobile/modules/t3-ssh/android/src/test/java/expo/modules/t3ssh/TestServers.kt
++++ b/apps/mobile/modules/t3-ssh/android/src/test/java/expo/modules/t3ssh/TestServers.kt
+@@ -15,7 +15,7 @@ import kotlin.concurrent.thread
+ class TestSshd(
+   private val dir: File,
+   authorizedKeys: String,
+-  extraConfig: String = "",
++  extraConfig: String = ""
+ ) : Closeable {
+   val port: Int = freeLoopbackPort()
+   val hostKeyPublicFile = File(dir, "host_ed25519.pub")
+@@ -58,7 +58,9 @@ class TestSshd(
+   }
+ 
+   /** This server's entry, filed under `[127.0.0.1]:port` unless given another name. */
+-  fun knownHost(name: String = KnownHosts.name("127.0.0.1", port)) = KnownHost(listOf(name), hostKeyType, hostKeyBase64)
++  fun knownHost(
++    name: String = KnownHosts.name("127.0.0.1", port)
++  ) = KnownHost(listOf(name), hostKeyType, hostKeyBase64)
+ 
+   fun log(): String = File(dir, "sshd.log").takeIf { it.exists() }?.readText().orEmpty()
+ 
+@@ -73,7 +75,8 @@ class TestSshd(
+     val user: String = System.getProperty("user.name") ?: error("no user.name")
+ 
+     val available: Boolean
+-      get() = File(SSHD).canExecute() && runCatching { run("ssh-keygen", "-?", check = false) }.isSuccess
++      get() = File(SSHD).canExecute() &&
++        runCatching { run("ssh-keygen", "-?", check = false) }.isSuccess
+   }
+ }
+ 
+@@ -135,7 +138,8 @@ class TcpRelay(private val targetPort: Int) : Closeable {
+ class TestHttpService(body: String) : Closeable {
+   private val server = ServerSocket(0, 50, InetAddress.getLoopbackAddress())
+   private val response = body.toByteArray().let { bytes ->
+-    "HTTP/1.1 200 OK\r\nContent-Length: ${bytes.size}\r\nConnection: close\r\n\r\n".toByteArray() + bytes
++    "HTTP/1.1 200 OK\r\nContent-Length: ${bytes.size}\r\nConnection: close\r\n\r\n".toByteArray() +
++      bytes
+   }
+ 
+   val port: Int get() = server.localPort
+@@ -164,7 +168,9 @@ class TestHttpService(body: String) : Closeable {
+   override fun close() = server.close()
+ }
+ 
+-fun freeLoopbackPort(): Int = ServerSocket(0, 1, InetAddress.getLoopbackAddress()).use { it.localPort }
++fun freeLoopbackPort(): Int = ServerSocket(0, 1, InetAddress.getLoopbackAddress()).use {
++  it.localPort
++}
+ 
+ fun run(vararg command: String, check: Boolean = true): String {
+   val process = ProcessBuilder(*command).redirectErrorStream(true).start()

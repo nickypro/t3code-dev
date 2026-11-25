@@ -1,0 +1,13 @@
+diff --git a/apps/mobile/src/components/MediaVideoPlayer.tsx b/apps/mobile/src/components/MediaVideoPlayer.tsx
+index e66b88a30a5e3d02fecfeb5a8a3d61b3de5852b6..2a89fb98e3237074174f1b41a944e40475ff69c1 100644
+--- a/apps/mobile/src/components/MediaVideoPlayer.tsx
++++ b/apps/mobile/src/components/MediaVideoPlayer.tsx
+@@ -32,6 +32,8 @@ function LoadedMediaVideo(props: {
+   const [loadState, setLoadState] = useState<"pending" | "complete" | "error">("pending");
+   const player = useVideoPlayer(null, (player) => {
+     player.staysActiveInBackground = false;
++    // Android's native default is false, which raises the voice pitch at faster speeds.
++    player.preservesPitch = true;
+     player.bufferOptions = { preferredForwardBufferDuration: 5 };
+   });
+   const playback = createAudioPlaybackSession(player, true);

@@ -1,0 +1,205 @@
+diff --git a/apps/mobile/modules/t3-client-certificates/android/src/main/java/expo/modules/t3clientcertificates/CertificateTls.kt b/apps/mobile/modules/t3-client-certificates/android/src/main/java/expo/modules/t3clientcertificates/CertificateTls.kt
+index c038c7f983ef057f70fdf80714d7e5ab8be55600..f9537f66ee983dc81bbadaf404a2b3b98c6e91a7 100644
+--- a/apps/mobile/modules/t3-client-certificates/android/src/main/java/expo/modules/t3clientcertificates/CertificateTls.kt
++++ b/apps/mobile/modules/t3-client-certificates/android/src/main/java/expo/modules/t3clientcertificates/CertificateTls.kt
+@@ -116,6 +116,51 @@ internal class CertificateGenerations {
+   }
+ }
+ 
++/**
++ * Remembers the TLS identity resolved for each alias. Without it every new connection asks
++ * KeyChain for the key again and starts a full handshake, which costs seconds when the app
++ * reconnects to many hosts at once. One context per alias also lets a host resume its session.
++ * A changed or removed identity clears it, and an entry is resolved again after [maxAgeNanos].
++ */
++internal class IdentityFactoryCache(
++  private val maxAgeNanos: Long = 30L * 60 * 1_000_000_000,
++  private val now: () -> Long = System::nanoTime
++) {
++  private class Entry(val factory: SSLSocketFactory, val at: Long)
++
++  private val entries = HashMap<String, Entry>()
++  private val aliasLocks = HashMap<String, Any>()
++  private var epoch = 0L
++
++  @Synchronized private fun aliasLock(alias: String): Any = aliasLocks.getOrPut(alias) { Any() }
++
++  @Synchronized private fun epoch(): Long = epoch
++
++  @Synchronized private fun cached(alias: String): SSLSocketFactory? =
++    entries[alias]?.takeIf { now() - it.at < maxAgeNanos }?.factory
++
++  // A result resolved before a clear may belong to the identity that was removed.
++  @Synchronized private fun remember(alias: String, resolvedAt: Long, factory: SSLSocketFactory) {
++    if (resolvedAt == epoch) entries[alias] = Entry(factory, now())
++  }
++
++  /** Connections that start together for one alias wait for a single [resolve]. */
++  fun get(alias: String, resolve: () -> SSLSocketFactory): SSLSocketFactory {
++    cached(alias)?.let { return it }
++    return synchronized(aliasLock(alias)) {
++      cached(alias) ?: run {
++        val resolvedAt = epoch()
++        resolve().also { remember(alias, resolvedAt, it) }
++      }
++    }
++  }
++
++  @Synchronized fun clear() {
++    epoch += 1
++    entries.clear()
++  }
++}
++
+ // OkHttp permits HTTP/2 connection coalescing across hosts only with its own verifier instance.
+ // Delegating the same checks preserves HTTP/2 within an origin without sharing its client identity.
+ internal val originHostnameVerifier: HostnameVerifier =
+diff --git a/apps/mobile/modules/t3-client-certificates/android/src/main/java/expo/modules/t3clientcertificates/T3CertificateTransport.kt b/apps/mobile/modules/t3-client-certificates/android/src/main/java/expo/modules/t3clientcertificates/T3CertificateTransport.kt
+index 9ec32593a4e562f57c936e12692999fe0c038b4d..eae3150881b333dc7691468fdf6083dc32c04e64 100644
+--- a/apps/mobile/modules/t3-client-certificates/android/src/main/java/expo/modules/t3clientcertificates/T3CertificateTransport.kt
++++ b/apps/mobile/modules/t3-client-certificates/android/src/main/java/expo/modules/t3clientcertificates/T3CertificateTransport.kt
+@@ -1,7 +1,9 @@
+ package expo.modules.t3clientcertificates
+ 
+ import android.content.Context
++import android.os.SystemClock
+ import android.security.KeyChain
++import android.util.Log
+ import com.facebook.react.modules.network.CustomClientBuilder
+ import com.facebook.react.modules.network.NetworkingModule
+ import com.facebook.react.modules.network.OkHttpClientFactory
+@@ -31,6 +33,7 @@ class T3CertificateTransport private constructor(private val context: Context) {
+ 
+   // Accessed only under lock. Tokens distinguish remove/re-add and same-alias replacement.
+   private val generations = CertificateGenerations()
++  private val identities = IdentityFactoryCache()
+   private val trust: X509TrustManager
+   private val defaultTls: SSLContext
+   private val socketFactory: SSLSocketFactory
+@@ -70,10 +73,12 @@ class T3CertificateTransport private constructor(private val context: Context) {
+ 
+   internal fun invalidate(origin: String) {
+     generations.invalidate(origin)
++    identities.clear()
+   }
+ 
+   internal fun invalidateAll() {
+     generations.invalidateAll()
++    identities.clear()
+   }
+ 
+   /** Wraps another factory so its interceptors stay while every client gets this transport. */
+@@ -101,9 +106,14 @@ class T3CertificateTransport private constructor(private val context: Context) {
+     OkHttpClientProvider.setOkHttpClientFactory(CertificateClientFactory(current))
+   }
+ 
+-  @Suppress("TooGenericExceptionCaught") // Any KeyChain or TLS setup failure fails the connection.
+   private fun identityFactory(origin: String): SSLSocketFactory {
+     val alias = resolveCertificateAlias(preferences, origin) ?: return defaultTls.socketFactory
++    return identities.get(alias) { resolveIdentity(alias) }
++  }
++
++  @Suppress("TooGenericExceptionCaught") // Any KeyChain or TLS setup failure fails the connection.
++  private fun resolveIdentity(alias: String): SSLSocketFactory {
++    val startedAt = SystemClock.elapsedRealtime()
+     return try {
+       val key =
+         checkNotNull(KeyChain.getPrivateKey(context, alias)) {
+@@ -114,12 +124,15 @@ class T3CertificateTransport private constructor(private val context: Context) {
+           "Client certificate chain is unavailable. Select it again in Connections."
+         }
+       chain.forEach { it.checkValidity() }
+-      // Resolve the KeyChain grant on each new connection. No exported keys or TLS session
+-      // resumption across a removed/replaced identity.
++      // No exported keys. The cache drops this context when the identity is removed or
++      // replaced, so no TLS session is resumed across that change.
+       SSLContext
+         .getInstance("TLS")
+         .apply { init(arrayOf(SelectedIdentity(alias, key, chain)), arrayOf(trust), null) }
+         .socketFactory
++        .also {
++          Log.i(TAG, "resolved client identity in ${SystemClock.elapsedRealtime() - startedAt} ms")
++        }
+     } catch (error: Exception) {
+       throw IOException("Client certificate '$alias' could not be used: ${error.message}", error)
+     }
+@@ -129,6 +142,8 @@ class T3CertificateTransport private constructor(private val context: Context) {
+     builder.sslSocketFactory(socketFactory, trust).hostnameVerifier(originHostnameVerifier)
+ 
+   companion object {
++    private const val TAG = "T3Certificates"
++
+     @Volatile private var instance: T3CertificateTransport? = null
+ 
+     @JvmStatic
+diff --git a/apps/mobile/modules/t3-client-certificates/android/src/test/java/expo/modules/t3clientcertificates/CertificateTlsTest.kt b/apps/mobile/modules/t3-client-certificates/android/src/test/java/expo/modules/t3clientcertificates/CertificateTlsTest.kt
+index d1b821feefa19b843de74f957ba717451214e6b1..b9604b91491698fb5839a983f6832db4c17632fd 100644
+--- a/apps/mobile/modules/t3-client-certificates/android/src/test/java/expo/modules/t3clientcertificates/CertificateTlsTest.kt
++++ b/apps/mobile/modules/t3-client-certificates/android/src/test/java/expo/modules/t3clientcertificates/CertificateTlsTest.kt
+@@ -558,4 +558,66 @@ class CertificateTlsTest {
+       server.shutdown()
+     }
+   }
++
++  private fun socketFactory() = SSLContext.getInstance("TLS").apply { init(null, null, null) }.socketFactory
++
++  @Test fun identityIsResolvedOnceForConnectionsThatStartTogether() {
++    val cache = IdentityFactoryCache()
++    val resolves = java.util.concurrent.atomic.AtomicInteger()
++    val started = CountDownLatch(1)
++    val pool = Executors.newFixedThreadPool(8)
++    try {
++      val results =
++        (1..8)
++          .map {
++            pool.submit<Any> {
++              started.await()
++              cache.get("phone") {
++                resolves.incrementAndGet()
++                Thread.sleep(50)
++                socketFactory()
++              }
++            }
++          }
++          .also { started.countDown() }
++          .map { it.get(5, TimeUnit.SECONDS) }
++      assertEquals(1, resolves.get())
++      results.forEach { assertSame(results.first(), it) }
++      // Another alias is another identity.
++      assertNotSame(results.first(), cache.get("laptop") { socketFactory() })
++    } finally {
++      pool.shutdownNow()
++    }
++  }
++
++  @Test fun changedIdentityIsResolvedAgain() {
++    val cache = IdentityFactoryCache()
++    val first = cache.get("phone") { socketFactory() }
++    assertSame(first, cache.get("phone") { fail("cached"); socketFactory() })
++    cache.clear()
++    assertNotSame(first, cache.get("phone") { socketFactory() })
++  }
++
++  @Test fun identityResolvedWhileItChangedIsNotRemembered() {
++    val cache = IdentityFactoryCache()
++    // The connection that asked still gets its answer; its generation check rejects it.
++    val stale = cache.get("phone") { cache.clear(); socketFactory() }
++    assertNotSame(stale, cache.get("phone") { socketFactory() })
++  }
++
++  @Test fun failedResolveIsRetriedAndOldIdentityExpires() {
++    var now = 0L
++    val cache = IdentityFactoryCache(maxAgeNanos = 100) { now }
++    try {
++      cache.get("phone") { throw IOException("KeyChain unavailable") }
++      fail("The failure must reach the connection")
++    } catch (_: IOException) {
++      // Expected.
++    }
++    val first = cache.get("phone") { socketFactory() }
++    now = 99
++    assertSame(first, cache.get("phone") { socketFactory() })
++    now = 100
++    assertNotSame(first, cache.get("phone") { socketFactory() })
++  }
+ }

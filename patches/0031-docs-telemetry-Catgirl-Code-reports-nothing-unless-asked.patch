@@ -1,0 +1,31 @@
+diff --git a/docs/internals/08_product-analytics.md b/docs/internals/08_product-analytics.md
+index a4ff71dc60107fcd7e2c8272d6f0b070911f6e46..3378eb3abd0f21f494adb5874d937a361ad0bac2 100644
+--- a/docs/internals/08_product-analytics.md
++++ b/docs/internals/08_product-analytics.md
+@@ -1,5 +1,10 @@
+ # Product analytics
+ 
++> **Catgirl Code.** This fork reports nothing to upstream unless asked: `TELEMETRY_ON_BY_DEFAULT`
++> in [`otelEnvironment.ts`](../../packages/shared/src/otelEnvironment.ts) is `false`, so analytics
++> and relay tracing wait for `T3CODE_TELEMETRY_ENABLED=true`. Keep anything new that reports to
++> upstream behind `isTelemetryOnByDefault` or `AnalyticsService`, never beside them.
++
+ The server owns analytics delivery, opt-out, and identity for every connected client. Clients never
+ load the PostHog browser SDK, PostHog person profiles stay disabled, and visiting hosted web without
+ an authenticated connection does not count as product use.
+diff --git a/docs/user/telemetry.md b/docs/user/telemetry.md
+index 05ae99e2d1d312abcfa89bb1a9f96a6f1262a5c6..3a278ab6fcd18ba766b2d197ab6b423323b9ce1e 100644
+--- a/docs/user/telemetry.md
++++ b/docs/user/telemetry.md
+@@ -1,5 +1,11 @@
+ # Product usage data
+ 
++> **Catgirl Code** is a fork of T3 Code and sends none of what this page describes unless you turn
++> it on. Product usage events and relay connection traces stay off until you set
++> `T3CODE_TELEMETRY_ENABLED=true` in the server's environment. The mobile app's crash reports and
++> connection traces stay off until you turn them on in **Settings > About > Diagnostics**. The rest
++> of this page describes what each one sends once it is on.
++
+ The T3 Code server sends product usage events to T3 Code's own endpoint at `ingest.t3.codes`,
+ associated with a hashed random identifier for the installation. To count how many installations one person
+ uses, the server also sends a hashed identifier for your T3 Connect account when you are signed in
