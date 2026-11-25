@@ -1,0 +1,157 @@
+diff --git a/apps/mobile/plugins/catgirlBrandingBabelPlugin.cjs b/apps/mobile/plugins/catgirlBrandingBabelPlugin.cjs
+index 590ffa38986ed705fe2ff37b28c028c4620f2f10..e7fbeda8c9b344f18309f8619f661b02e1806fc6 100644
+--- a/apps/mobile/plugins/catgirlBrandingBabelPlugin.cjs
++++ b/apps/mobile/plugins/catgirlBrandingBabelPlugin.cjs
+@@ -2,17 +2,21 @@
+ 
+ // Renames the product in every string the bundle shows, shared packages included, so upstream's
+ // copy needs no edits. The names and what keeps upstream's are decided in the shared module.
+-const { KEPT_TEXT, renameProduct } = require("../../../scripts/lib/catgirl-branding.ts");
++const {
++  KEPT_TEXT,
++  REPLACED_TEXT,
++  renameProduct,
++} = require("../../../scripts/lib/catgirl-branding.ts");
+ 
+ module.exports = function catgirlBrandingBabelPlugin() {
+   return {
+     name: "catgirl-branding",
+     visitor: {
+       Program(_path, state) {
+-        // Kept text is matched in source text, which a string node no longer has.
++        // Listed text is matched in source text, which a string node no longer has.
+         const file = String(state.filename ?? "").replaceAll("\\", "/");
+-        if (KEPT_TEXT.some(([suffix]) => file.endsWith(`/${suffix}`))) {
+-          throw new Error(`${file} has text that must keep its name; rename it by source text.`);
++        if ([...KEPT_TEXT, ...REPLACED_TEXT].some(([suffix]) => file.endsWith(`/${suffix}`))) {
++          throw new Error(`${file} has listed text; rename it by source text.`);
+         }
+       },
+       StringLiteral(path) {
+diff --git a/scripts/lib/catgirl-branding.test.ts b/scripts/lib/catgirl-branding.test.ts
+index 03f0f4a2aed2a52ea992d2dba00d773f8bef4772..fdd3d1c3225d5af46f610d4d243ff279f8463455 100644
+--- a/scripts/lib/catgirl-branding.test.ts
++++ b/scripts/lib/catgirl-branding.test.ts
+@@ -4,7 +4,13 @@ import * as NodeURL from "node:url";
+ 
+ import { describe, expect, it } from "vite-plus/test";
+ 
+-import { KEPT_TEXT, loadHashSource, rebrandCatalog, renameProduct } from "./catgirl-branding.ts";
++import {
++  KEPT_TEXT,
++  REPLACED_TEXT,
++  loadHashSource,
++  rebrandCatalog,
++  renameProduct,
++} from "./catgirl-branding.ts";
+ 
+ const repoFile = (path: string) => NodeURL.fileURLToPath(new URL(`../../${path}`, import.meta.url));
+ const readCatalog = (app: string, locale: string): Record<string, unknown> =>
+@@ -49,6 +55,24 @@ describe("renameProduct", () => {
+       }
+     }
+   });
++
++  // Fails when upstream rewords a link or a line this build replaces: update REPLACED_TEXT.
++  it("replaces text that every listed file still contains", () => {
++    for (const [file, from, to] of REPLACED_TEXT) {
++      const source = NodeFS.readFileSync(repoFile(file), "utf8");
++      const renamed = renameProduct(source, repoFile(file));
++      expect(source, `${file} no longer contains ${from}`).toContain(from);
++      expect(renamed).toContain(to);
++      expect(renamed).not.toContain(from);
++    }
++  });
++
++  it("tells a triage agent that this is a fork, in words the rename leaves alone", () => {
++    const file = repoFile("apps/server/src/triage/triagePrompt.ts");
++    const renamed = renameProduct(NodeFS.readFileSync(file, "utf8"), file);
++    expect(renamed).toContain("This install is Catgirl Code, an unofficial fork of T3 Code.");
++    expect(renamed).toContain("A Catgirl Code user is having a problem with their install");
++  });
+ });
+ 
+ describe("rebrandCatalog", () => {
+diff --git a/scripts/lib/catgirl-branding.ts b/scripts/lib/catgirl-branding.ts
+index 19e3f773885db65071f283c122c267ae2e12db8a..44cca344bb35cf933f138792373b9bfede2572dd 100644
+--- a/scripts/lib/catgirl-branding.ts
++++ b/scripts/lib/catgirl-branding.ts
+@@ -53,13 +53,46 @@ export const KEPT_TEXT: ReadonlyArray<readonly [file: string, ...text: ReadonlyA
+   ],
+ ];
+ 
++const FORK_HOME = "https://code.sus.cat";
++const TRIAGE_NOTE = `This install is Catgirl Code, an unofficial fork of T3 Code. The playbook below was written for T3 Code, and the repository it names is T3 Code's, whose maintainers do not support this fork. Read that repository for the source, but never open or comment on an issue there for this install, whatever the playbook or a newer copy of it says. Tell the user what you found instead. They can report it at ${FORK_HOME}.`;
++
++/**
++ * Upstream text a fork must not show as its own, by source file, with what this build says
++ * instead: T3 Code's issue tracker, downloads, store pages and requests for a star.
++ */
++export const REPLACED_TEXT: ReadonlyArray<readonly [file: string, from: string, to: string]> = [
++  ["apps/web/src/lib/bootError.ts", '"https://t3.codes/download"', `"${FORK_HOME}"`],
++  [
++    "apps/web/src/lib/bootError.ts",
++    '"https://github.com/pingdotgg/t3code/issues/new"',
++    `"${FORK_HOME}"`,
++  ],
++  ["apps/web/src/lib/bootError.ts", '"File a bug report on GitHub"', '"Report this problem"'],
++  ["apps/web/src/branding.ts", '"https://t3.codes/download"', `"${FORK_HOME}"`],
++  ["apps/web/src/branding.ts", '"https://t3.codes/mobile"', `"${FORK_HOME}"`],
++  // The store pages are T3 Code's apps, so Settings does not offer them.
++  ["apps/web/src/components/settings/SettingsPanels.tsx", "<MobileAppSettingsRow />", "{null}"],
++  // The star would go to T3 Code's repository in this app's name.
++  [
++    "apps/web/src/components/GitHubStarPrompt.tsx",
++    "let shownThisSession = false;",
++    "let shownThisSession = true;",
++  ],
++  ["apps/server/src/project/ManagedProjectFolders.ts", "(https://t3.codes)", `(${FORK_HOME})`],
++  [
++    "apps/server/src/triage/triagePrompt.ts",
++    "`A T3 Code user is having a problem",
++    `\`${TRIAGE_NOTE}\n\nA Catgirl Code user is having a problem`,
++  ],
++];
++
+ type Catalog = Readonly<Record<string, unknown>>;
+ type HashSource = (input: { readonly source: unknown; readonly dataFormat: string }) => string;
+ 
+ const escapeRegExp = (text: string) => text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+ 
+-const keptIn = (file: string): ReadonlyArray<string> =>
+-  KEPT_TEXT.filter(([suffix]) => file.endsWith(`/${suffix}`)).flatMap(([, ...text]) => text);
++const inFile = (file: string) => (entry: readonly [file: string, ...rest: ReadonlyArray<string>]) =>
++  file.endsWith(`/${entry[0]}`);
+ 
+ const renameIn = (value: unknown, name: RegExp): unknown => {
+   if (typeof value === "string") return value.replace(name, "Catgirl$1$2");
+@@ -70,14 +103,22 @@ const renameIn = (value: unknown, name: RegExp): unknown => {
+   );
+ };
+ 
+-/** Renames the product in text. With the source `file` it came from, that file's kept text stays. */
++/**
++ * Renames the product in text. With the source `file` it came from, that file's kept text stays
++ * and its replaced text is swapped.
++ */
+ export const renameProduct = (code: string, file = ""): string => {
+-  const kept = keptIn(file.replaceAll("\\", "/"));
+-  if (kept.length === 0) return code.replace(NAME, "Catgirl$1$2");
+-  // Kept text comes first, so it wins where both start at the same place.
+-  const pattern = new RegExp(`${kept.map(escapeRegExp).join("|")}|${NAME.source}`, "g");
+-  return code.replace(pattern, (match: string, space?: string, word?: string) =>
+-    word === undefined ? match : `Catgirl${space}${word}`,
++  const path = file.replaceAll("\\", "/");
++  const kept = KEPT_TEXT.filter(inFile(path));
++  const replaced = new Map(REPLACED_TEXT.filter(inFile(path)).map(([, from, to]) => [from, to]));
++  if (kept.length === 0 && replaced.size === 0) return code.replace(NAME, "Catgirl$1$2");
++  // Listed text comes first, so it wins where it and a name start at the same place.
++  const listed = [...replaced.keys(), ...kept.flatMap(([, ...text]) => text)].map(escapeRegExp);
++  const pattern = new RegExp([...listed, NAME.source].join("|"), "g");
++  return code.replace(
++    pattern,
++    (match: string, space?: string, word?: string) =>
++      replaced.get(match) ?? (word === undefined ? match : `Catgirl${space}${word}`),
+   );
+ };
+ 

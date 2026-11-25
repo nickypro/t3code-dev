@@ -95,12 +95,15 @@ jobs:
           grep -rl "relay.slop.ie" apps/desktop/dist-electron apps/server/dist > /tmp/hits; head -5 /tmp/hits
           grep -rl "T3CODE_TLS_CLIENT_CERT" apps/server/dist | head -2 | grep -q . || { echo "::error::client-certificate patch missing from server bundle"; exit 1; }
           ls release/*0.1.12*.dmg
-          # The interface says Catgirl, not T3 (source maps keep the original text).
-          for name in "T3 Code" "T3 Connect"; do
-            hits=$(grep -rl --exclude='*.map' "$name" apps/server/dist/client/assets | wc -l | tr -d ' ')
-            echo "$name: $hits files"
-            [ "$hits" = "0" ] || { echo "::error::$name still appears in the web client"; exit 1; }
+          # The interface says Catgirl, not T3 (source maps keep the original text). A few "T3 Code"
+          # stay on purpose: names of upstream's own things and markers other programs read.
+          # grep exits 1 when it finds nothing, which is the good case here, so its status is dropped.
+          count() { { grep -rl --exclude='*.map' "$@" || true; } | wc -l | tr -d ' '; }
+          for name in "T3 Code" "T3 Connect" "Catgirl Code" "Catgirl Connect"; do
+            echo "$name: $(count "$name" apps/server/dist/client/assets) files in the web client, $(count "$name" apps/server/dist --exclude-dir=client) in the server bundle"
           done
+          [ "$(count "T3 Connect" apps/server/dist)" = "0" ] || { echo "::error::T3 Connect still appears in the built app"; exit 1; }
+          [ "$(count "Catgirl Code" apps/server/dist/client/assets)" != "0" ] || { echo "::error::the web client does not say Catgirl Code"; exit 1; }
           # Usage reports to upstream are off unless asked for.
           grep -rq "TELEMETRY_ON_BY_DEFAULT = false" apps/server/dist || echo "::warning::could not confirm telemetry is off by default in the server bundle"
           if find release -name app-update.yml | grep -q .; then

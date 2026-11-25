@@ -1,0 +1,651 @@
+diff --git a/apps/desktop/vite.config.ts b/apps/desktop/vite.config.ts
+index 4866dd32d08f9c244ec848d6d4751162a89ff78c..10d1126674ba3e6587cb789b3febbf5d359a3bf0 100644
+--- a/apps/desktop/vite.config.ts
++++ b/apps/desktop/vite.config.ts
+@@ -4,6 +4,7 @@ import * as NodeOS from "node:os";
+ import { defaultInclude, defineConfig } from "vite-plus";
+ import { Rolldown } from "vite-plus/pack";
+ 
++import { withCatgirlBranding } from "../../scripts/lib/catgirl-branding.ts";
+ import { isDesktopRuntimeExternalDependency } from "../../scripts/lib/desktop-external-packages.ts";
+ import { loadRepoEnv } from "../../scripts/lib/public-config.ts";
+ 
+@@ -87,7 +88,7 @@ export default defineConfig({
+       },
+     },
+   },
+-  pack: [
++  pack: withCatgirlBranding([
+     {
+       format: "cjs",
+       outDir: "dist-electron",
+@@ -181,7 +182,7 @@ export default defineConfig({
+       outExtensions: () => ({ js: ".cjs" }),
+       entry: ["src/mac-permission-preload.ts"],
+     },
+-  ],
++  ]),
+   test: {
+     // The Windows lane runs workspace suites concurrently; filesystem-heavy
+     // desktop integration tests can exceed Vitest's 5 second default there.
+diff --git a/apps/mobile/plugins/catgirlBrandingBabelPlugin.cjs b/apps/mobile/plugins/catgirlBrandingBabelPlugin.cjs
+index 5749566f49cac3579f9bc776b0a571be248c8527..590ffa38986ed705fe2ff37b28c028c4620f2f10 100644
+--- a/apps/mobile/plugins/catgirlBrandingBabelPlugin.cjs
++++ b/apps/mobile/plugins/catgirlBrandingBabelPlugin.cjs
+@@ -1,28 +1,37 @@
+ "use strict";
+ 
+ // Renames the product in every string the bundle shows, shared packages included, so upstream's
+-// copy needs no edits. \s+ also covers a name that JSX text wraps across two lines.
+-const OLD_NAME = /T3\s+(?:Code|Connect)\b/;
+-const rename = (text) => text.replace(/T3(\s+)(Code|Connect)\b/g, "Catgirl$1$2");
++// copy needs no edits. The names and what keeps upstream's are decided in the shared module.
++const { KEPT_TEXT, renameProduct } = require("../../../scripts/lib/catgirl-branding.ts");
+ 
+ module.exports = function catgirlBrandingBabelPlugin() {
+   return {
+     name: "catgirl-branding",
+     visitor: {
++      Program(_path, state) {
++        // Kept text is matched in source text, which a string node no longer has.
++        const file = String(state.filename ?? "").replaceAll("\\", "/");
++        if (KEPT_TEXT.some(([suffix]) => file.endsWith(`/${suffix}`))) {
++          throw new Error(`${file} has text that must keep its name; rename it by source text.`);
++        }
++      },
+       StringLiteral(path) {
+-        if (!OLD_NAME.test(path.node.value)) return;
+-        path.node.value = rename(path.node.value);
++        const renamed = renameProduct(path.node.value);
++        if (renamed === path.node.value) return;
++        path.node.value = renamed;
+         delete path.node.extra;
+       },
+       JSXText(path) {
+-        if (!OLD_NAME.test(path.node.value)) return;
+-        path.node.value = rename(path.node.value);
++        const renamed = renameProduct(path.node.value);
++        if (renamed === path.node.value) return;
++        path.node.value = renamed;
+         delete path.node.extra;
+       },
+       TemplateElement(path) {
+         const { raw, cooked } = path.node.value;
+-        if (!OLD_NAME.test(raw)) return;
+-        path.node.value = { raw: rename(raw), cooked: cooked == null ? cooked : rename(cooked) };
++        const renamed = renameProduct(raw);
++        if (renamed === raw) return;
++        path.node.value = { raw: renamed, cooked: cooked == null ? cooked : renameProduct(cooked) };
+       },
+     },
+   };
+diff --git a/apps/server/vite.config.ts b/apps/server/vite.config.ts
+index 2bec8830d86c51b2fff6883b2e8d232741fa8800..ea68bf93c4dfd04d57174a0efcb4a7e41a492e36 100644
+--- a/apps/server/vite.config.ts
++++ b/apps/server/vite.config.ts
+@@ -4,6 +4,7 @@ import * as NodePath from "node:path";
+ import { defineConfig, mergeConfig } from "vite-plus";
+ 
+ import baseConfig from "../../vite.config.ts";
++import { catgirlBrandingPlugin } from "../../scripts/lib/catgirl-branding.ts";
+ import { loadRepoEnv } from "../../scripts/lib/public-config.ts";
+ import { resolveTaggedSourceVersion } from "../../scripts/lib/tagged-source-version.ts";
+ import rootPackageJson from "../../package.json" with { type: "json" };
+@@ -98,6 +99,7 @@ export default mergeConfig(
+     },
+     pack: {
+       plugins: [
++        catgirlBrandingPlugin(),
+         {
+           // Every server module reads its version from this manifest import.
+           name: "t3code:build-version",
+diff --git a/apps/web/src/catgirlBranding.test.ts b/apps/web/src/catgirlBranding.test.ts
+deleted file mode 100644
+index 0c86a33b3e1d12f60268e2b7946abccb597ef0d6..0000000000000000000000000000000000000000
+--- a/apps/web/src/catgirlBranding.test.ts
++++ /dev/null
+@@ -1,79 +0,0 @@
+-// @effect-diagnostics nodeBuiltinImport:off - reads the committed catalogs from disk.
+-import * as NodeFS from "node:fs";
+-
+-import { describe, expect, it } from "vite-plus/test";
+-
+-import { loadHashSource, rebrandCatalog, renameProduct } from "../vite/catgirlBranding";
+-
+-const readCatalog = (locale: string): Record<string, unknown> =>
+-  JSON.parse(
+-    NodeFS.readFileSync(new URL(`./i18n/translations/${locale}.json`, import.meta.url), "utf8"),
+-  );
+-
+-describe("renameProduct", () => {
+-  it("renames the product and its tunnel, and leaves other T3 names", () => {
+-    expect(renameProduct('gt("Restart T3 Code to use T3 Connect")')).toBe(
+-      'gt("Restart Catgirl Code to use Catgirl Connect")',
+-    );
+-    expect(renameProduct("<T>Open T3\n  Code</T>")).toBe("<T>Open Catgirl\n  Code</T>");
+-    expect(renameProduct('"T3 Chat" "T3 Codex" "t3 code"')).toBe('"T3 Chat" "T3 Codex" "t3 code"');
+-  });
+-});
+-
+-describe("rebrandCatalog", () => {
+-  const hashSource = loadHashSource();
+-  const key = (source: unknown, dataFormat: string) => hashSource({ source, dataFormat });
+-
+-  it("moves a translation to the hash of the renamed English, and renames its text", () => {
+-    const plain = "Restart T3 Code";
+-    const tree = ["Link ", { t: "b", i: 1, c: "T3 Connect" }];
+-    const english = { [key(plain, "ICU")]: plain, [key(tree, "JSX")]: tree, same: "Settings" };
+-    const german = {
+-      [key(plain, "ICU")]: "T3 Code neu starten (T3 Codes CLI)",
+-      [key(tree, "JSX")]: ["Verknüpfe ", { t: "b", i: 1, c: "T3-Connect-Konto" }],
+-      same: "Einstellungen",
+-    };
+-
+-    expect(rebrandCatalog(german, english, hashSource)).toEqual({
+-      [key("Restart Catgirl Code", "ICU")]: "Catgirl Code neu starten (Catgirl Codes CLI)",
+-      [key(["Link ", { t: "b", i: 1, c: "Catgirl Connect" }], "JSX")]: [
+-        "Verknüpfe ",
+-        { t: "b", i: 1, c: "Catgirl-Connect-Konto" },
+-      ],
+-      same: "Einstellungen",
+-    });
+-  });
+-
+-  it("reports an entry whose hash it cannot reproduce, and leaves its key", () => {
+-    const unknown: string[] = [];
+-    const rebranded = rebrandCatalog(
+-      { abc: "T3 Code öffnen" },
+-      { abc: "Open T3 Code" },
+-      hashSource,
+-      (entry) => unknown.push(entry),
+-    );
+-    expect(unknown).toEqual(["abc"]);
+-    expect(rebranded).toEqual({ abc: "Catgirl Code öffnen" });
+-  });
+-
+-  // Fails when upstream adds product copy this cannot re-key, such as one with a $context.
+-  it("re-keys every committed translation that names the product", () => {
+-    const english = readCatalog("en");
+-    const named = Object.values(english).filter(
+-      (source) => renameProduct(JSON.stringify(source)) !== JSON.stringify(source),
+-    );
+-    expect(named.length).toBeGreaterThan(0);
+-    for (const locale of ["en", "de", "ja", "sv"]) {
+-      const unknown: string[] = [];
+-      const catalog = readCatalog(locale);
+-      const rebranded = rebrandCatalog(catalog, english, hashSource, (entry) =>
+-        unknown.push(entry),
+-      );
+-      expect(unknown).toEqual([]);
+-      expect(Object.keys(rebranded)).toHaveLength(Object.keys(catalog).length);
+-      expect(JSON.stringify(rebranded)).not.toMatch(/T3[\s-]+(?:Code|Connect)/);
+-      const moved = Object.keys(rebranded).filter((entry) => !Object.hasOwn(catalog, entry));
+-      expect(moved).toHaveLength(named.length);
+-    }
+-  });
+-});
+diff --git a/apps/web/tsconfig.json b/apps/web/tsconfig.json
+index cf697e89b1c32a8d02667d9f3162abb0af4cc79e..6f2e8a99f8a65072fa37d2280035ff5e89adf409 100644
+--- a/apps/web/tsconfig.json
++++ b/apps/web/tsconfig.json
+@@ -37,6 +37,7 @@
+     "test",
+     "scripts/verify-built-boot.ts",
+     "scripts/warm-dep-cache.ts",
++    "../../scripts/lib/catgirl-branding.ts",
+     "../../scripts/lib/public-config.ts",
+     "../../scripts/lib/tagged-source-version.ts",
+     "../../scripts/lib/third-party-licenses.ts"
+diff --git a/apps/web/vite.config.ts b/apps/web/vite.config.ts
+index 5ea6f652a8e27f1ea3315a6021e00db22f505d28..f5ea4f6fb78e27d20ad3813a98d8ce1a5903c13e 100644
+--- a/apps/web/vite.config.ts
++++ b/apps/web/vite.config.ts
+@@ -15,10 +15,10 @@ import pdfjsPkg from "pdfjs-dist/package.json" with { type: "json" };
+ 
+ import { DEV_PROXIED_PATH_PREFIXES } from "@t3tools/shared/devProxy";
+ 
++import { catgirlBrandingPlugin } from "../../scripts/lib/catgirl-branding";
+ import { loadRepoEnv } from "../../scripts/lib/public-config";
+ import { resolveTaggedSourceVersion } from "../../scripts/lib/tagged-source-version";
+ import { thirdPartyLicensesPlugin } from "../../scripts/lib/third-party-licenses";
+-import { catgirlBrandingPlugin } from "./vite/catgirlBranding";
+ import { tailwindPlugins } from "./vite/tailwind";
+ import { warmBundledDevPlugin } from "./vite/warmBundledDev";
+ import { formatAppDisplayName, resolveWebAppStageLabel } from "./src/branding.logic";
+diff --git a/apps/web/vite/catgirlBranding.ts b/apps/web/vite/catgirlBranding.ts
+deleted file mode 100644
+index 80af252eda904ff5ad5db8066d821b43f5849a9a..0000000000000000000000000000000000000000
+--- a/apps/web/vite/catgirlBranding.ts
++++ /dev/null
+@@ -1,91 +0,0 @@
+-// @effect-diagnostics nodeBuiltinImport:off -- Vite plugin, runs before any Effect runtime.
+-import * as NodeFS from "node:fs";
+-import * as NodeModule from "node:module";
+-import * as NodePath from "node:path";
+-
+-import type { Plugin } from "vite-plus";
+-
+-// \s+ also covers a name that JSX text wraps across two lines.
+-const NAME = /T3(\s+)(Code|Connect)\b/g;
+-// Translators also join the name into compounds ("T3-Code-Desktop-App") and inflect it ("T3 Codes CLI").
+-const TRANSLATED_NAME = /T3([\s-]+)(Code|Connect)(?=s?\b)/g;
+-const CATALOG_FILE = /\/src\/i18n\/translations\/[^/]+\.json$/;
+-
+-type Catalog = Readonly<Record<string, unknown>>;
+-type HashSource = (input: { readonly source: unknown; readonly dataFormat: string }) => string;
+-
+-const renameIn = (value: unknown, name: RegExp): unknown => {
+-  if (typeof value === "string") return value.replace(name, "Catgirl$1$2");
+-  if (Array.isArray(value)) return value.map((item) => renameIn(item, name));
+-  if (typeof value !== "object" || value === null) return value;
+-  return Object.fromEntries(
+-    Object.entries(value).map(([key, item]) => [key, renameIn(item, name)]),
+-  );
+-};
+-
+-/** Renames the product in source text the way the bundle's strings are renamed. */
+-export const renameProduct = (code: string): string => code.replace(NAME, "Catgirl$1$2");
+-
+-/**
+- * A translation is found by a hash of its English text, and the rename changes that text. So an
+- * entry whose English names the product moves to the hash of the renamed English.
+- */
+-export function rebrandCatalog(
+-  catalog: Catalog,
+-  english: Catalog,
+-  hashSource: HashSource,
+-  onUnknownKey: (key: string) => void = () => {},
+-): Catalog {
+-  const rebranded: Record<string, unknown> = {};
+-  for (const [key, translation] of Object.entries(catalog)) {
+-    const source = english[key];
+-    const renamedSource = renameIn(source, NAME);
+-    let renamedKey = key;
+-    if (JSON.stringify(renamedSource) !== JSON.stringify(source)) {
+-      const dataFormat = ["ICU", "JSX"].find(
+-        (format) => hashSource({ source, dataFormat: format }) === key,
+-      );
+-      if (dataFormat === undefined) onUnknownKey(key);
+-      else renamedKey = hashSource({ source: renamedSource, dataFormat });
+-    }
+-    rebranded[renamedKey] = renameIn(translation, TRANSLATED_NAME);
+-  }
+-  return rebranded;
+-}
+-
+-// gt-react's own hash, from the package it depends on, so keys match what the app computes.
+-export function loadHashSource(): HashSource {
+-  const requireFromApp = NodeModule.createRequire(import.meta.url);
+-  const requireFromGT = NodeModule.createRequire(requireFromApp.resolve("gt-react"));
+-  return (requireFromGT("generaltranslation/id") as { readonly hashSource: HashSource }).hashSource;
+-}
+-
+-// Catgirl Code: renames the product in display text at build time, so upstream's strings need no
+-// patching one by one and new ones are covered too. "T3 Chat" is a separate product and stays.
+-// Tests run without it, so they still assert upstream's wording.
+-export function catgirlBrandingPlugin(): Plugin {
+-  let hashSource: HashSource | undefined;
+-  return {
+-    name: "catgirl:branding",
+-    enforce: "pre",
+-    transform(code, id) {
+-      const file = id.split("?")[0] ?? id;
+-      if (file.includes("/node_modules/")) return null;
+-      if (CATALOG_FILE.test(file)) {
+-        hashSource ??= loadHashSource();
+-        const english: Catalog = JSON.parse(
+-          NodeFS.readFileSync(NodePath.join(NodePath.dirname(file), "en.json"), "utf8"),
+-        );
+-        const rebranded = rebrandCatalog(JSON.parse(code), english, hashSource, (key) =>
+-          this.warn(
+-            `${NodePath.basename(file)}: ${key} keeps its English text; its hash is not reproducible`,
+-          ),
+-        );
+-        return { code: JSON.stringify(rebranded), map: null };
+-      }
+-      if (!/\.[cm]?[jt]sx?$/.test(file)) return null;
+-      const renamed = renameProduct(code);
+-      return renamed === code ? null : { code: renamed, map: null };
+-    },
+-  };
+-}
+diff --git a/scripts/build-desktop-artifact.ts b/scripts/build-desktop-artifact.ts
+index 03390c19129e33cd3f22370b311c8dd9c936a47a..fdeea2a7eabb1c20ff019d272c5fdb5cf22a7aeb 100644
+--- a/scripts/build-desktop-artifact.ts
++++ b/scripts/build-desktop-artifact.ts
+@@ -36,6 +36,7 @@ import {
+   type WebAssetBrand,
+ } from "./lib/brand-assets.ts";
+ import { getDefaultBuildArch } from "./lib/build-target-arch.ts";
++import { renameProduct } from "./lib/catgirl-branding.ts";
+ import {
+   findInlinedExternalPackages,
+   selectCliRuntimeExternalDependencies,
+@@ -2575,6 +2576,8 @@ export const stageDesktopDmgBackground = Effect.fn("stageDesktopDmgBackground")(
+   if (!(yield* fs.exists(sourcePath))) {
+     return yield* new DesktopDmgBackgroundSourceMissingError({ channel, sourcePath });
+   }
++  // Catgirl Code: the staged copy of the picture tells people to drag Catgirl Code.
++  yield* fs.writeFileString(sourcePath, renameProduct(yield* fs.readFileString(sourcePath)));
+ 
+   for (const output of [
+     { suffix: "", width: 640, height: 432 },
+@@ -3049,7 +3052,7 @@ export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
+ // Identifiers (app id, executable and artifact names, URL schemes) do not contain the phrase.
+ function rebrandDisplayText<T>(value: T): T {
+   if (typeof value === "string") {
+-    return value.replaceAll("T3 Code", "Catgirl Code") as T;
++    return renameProduct(value) as T;
+   }
+   if (Array.isArray(value)) {
+     return value.map(rebrandDisplayText) as T;
+@@ -4033,7 +4036,7 @@ const buildDesktopArtifactUnlocked = Effect.fn("buildDesktopArtifactUnlocked")(f
+     },
+   };
+ 
+-  const stagePackageJsonString = yield* encodeJsonString(stagePackageJson);
++  const stagePackageJsonString = yield* encodeJsonString(rebrandDisplayText(stagePackageJson));
+   yield* fs.writeFileString(path.join(stageAppDir, "package.json"), `${stagePackageJsonString}\n`);
+   const stageWorkspaceConfig = createStageWorkspaceConfig({
+     platform: options.platform,
+diff --git a/scripts/lib/catgirl-branding.test.ts b/scripts/lib/catgirl-branding.test.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..03f0f4a2aed2a52ea992d2dba00d773f8bef4772
+--- /dev/null
++++ b/scripts/lib/catgirl-branding.test.ts
+@@ -0,0 +1,120 @@
++// @effect-diagnostics nodeBuiltinImport:off - reads the committed catalogs and sources from disk.
++import * as NodeFS from "node:fs";
++import * as NodeURL from "node:url";
++
++import { describe, expect, it } from "vite-plus/test";
++
++import { KEPT_TEXT, loadHashSource, rebrandCatalog, renameProduct } from "./catgirl-branding.ts";
++
++const repoFile = (path: string) => NodeURL.fileURLToPath(new URL(`../../${path}`, import.meta.url));
++const readCatalog = (app: string, locale: string): Record<string, unknown> =>
++  JSON.parse(
++    NodeFS.readFileSync(repoFile(`apps/${app}/src/i18n/translations/${locale}.json`), "utf8"),
++  );
++const UPSTREAM_NAME = /T3[\s-]+(?:Code|Connect)(?! for GitHub| SnapShots| · …)/;
++
++describe("renameProduct", () => {
++  it("renames the product and its tunnel, and leaves other T3 names", () => {
++    expect(renameProduct('gt("Restart T3 Code to use T3 Connect")')).toBe(
++      'gt("Restart Catgirl Code to use Catgirl Connect")',
++    );
++    expect(renameProduct("<T>Open T3\n  Code</T>")).toBe("<T>Open Catgirl\n  Code</T>");
++    expect(renameProduct('"T3 Chat" "T3 Codex" "t3 code"')).toBe('"T3 Chat" "T3 Codex" "t3 code"');
++  });
++
++  it("leaves the names of upstream's own things", () => {
++    const text = 'appName: "T3 Code for GitHub"; "Check T3 Code SnapShots"; "Revoke T3 Code · …"';
++    expect(renameProduct(text)).toBe(text);
++  });
++
++  it("leaves a file's kept text, and renames the rest of that file", () => {
++    const source = 'MARKER = "Written by T3 Code: runs it."; MOVED = "T3 Code has moved.";';
++    expect(renameProduct(source, "/repo/apps/desktop/src/app/DesktopCliShim.ts")).toBe(
++      'MARKER = "Written by T3 Code: runs it."; MOVED = "Catgirl Code has moved.";',
++    );
++    expect(renameProduct(source, "C:\\repo\\apps\\desktop\\src\\app\\DesktopCliShim.ts")).toContain(
++      "Written by T3 Code:",
++    );
++    expect(renameProduct(source, "/repo/apps/desktop/src/app/Other.ts")).not.toContain("T3 Code");
++  });
++
++  // Fails when upstream rewords or moves a marker: update KEPT_TEXT to its new text.
++  it("keeps text that every listed file still contains", () => {
++    for (const [file, ...kept] of KEPT_TEXT) {
++      const source = NodeFS.readFileSync(repoFile(file), "utf8");
++      const renamed = renameProduct(source, repoFile(file));
++      for (const text of kept) {
++        expect(source, `${file} no longer contains ${text}`).toContain(text);
++        expect(renamed).toContain(text);
++      }
++    }
++  });
++});
++
++describe("rebrandCatalog", () => {
++  const hashSource = loadHashSource(repoFile("apps/web/package.json"));
++  const key = (source: unknown, dataFormat: string) => hashSource({ source, dataFormat });
++
++  it("moves a translation to the hash of the renamed English, and renames its text", () => {
++    const plain = "Restart T3 Code";
++    const tree = ["Link ", { t: "b", i: 1, c: "T3 Connect" }];
++    const english = { [key(plain, "ICU")]: plain, [key(tree, "JSX")]: tree, same: "Settings" };
++    const german = {
++      [key(plain, "ICU")]: "T3 Code neu starten (T3 Codes CLI)",
++      [key(tree, "JSX")]: ["Verknüpfe ", { t: "b", i: 1, c: "T3-Connect-Konto" }],
++      same: "Einstellungen",
++    };
++
++    expect(rebrandCatalog(german, english, hashSource)).toEqual({
++      [key("Restart Catgirl Code", "ICU")]: "Catgirl Code neu starten (Catgirl Codes CLI)",
++      [key(["Link ", { t: "b", i: 1, c: "Catgirl Connect" }], "JSX")]: [
++        "Verknüpfe ",
++        { t: "b", i: 1, c: "Catgirl-Connect-Konto" },
++      ],
++      same: "Einstellungen",
++    });
++  });
++
++  it("leaves an entry that only names upstream's own things", () => {
++    const english = { abc: "Enable T3 Code SnapShots to start capturing windows." };
++    const german = { abc: "Aktiviere T3 Code SnapShots, um Fenster aufzunehmen." };
++    expect(rebrandCatalog(german, english, hashSource)).toEqual(german);
++  });
++
++  it("reports an entry whose hash it cannot reproduce, and leaves its key", () => {
++    const unknown: string[] = [];
++    const rebranded = rebrandCatalog(
++      { abc: "T3 Code öffnen" },
++      { abc: "Open T3 Code" },
++      hashSource,
++      (entry) => unknown.push(entry),
++    );
++    expect(unknown).toEqual(["abc"]);
++    expect(rebranded).toEqual({ abc: "Catgirl Code öffnen" });
++  });
++
++  // Fails when upstream adds product copy this cannot re-key, such as one with a $context.
++  it.each(["web", "mobile", "desktop"])(
++    "re-keys every committed %s translation that names the product",
++    (app) => {
++      const appHashSource = loadHashSource(repoFile(`apps/${app}/package.json`));
++      const english = readCatalog(app, "en");
++      const named = Object.values(english).filter(
++        (source) => renameProduct(JSON.stringify(source)) !== JSON.stringify(source),
++      );
++      expect(named.length).toBeGreaterThan(0);
++      for (const locale of ["en", "de", "ja", "sv"]) {
++        const unknown: string[] = [];
++        const catalog = readCatalog(app, locale);
++        const rebranded = rebrandCatalog(catalog, english, appHashSource, (entry) =>
++          unknown.push(entry),
++        );
++        expect(unknown).toEqual([]);
++        expect(Object.keys(rebranded)).toHaveLength(Object.keys(catalog).length);
++        expect(JSON.stringify(rebranded)).not.toMatch(UPSTREAM_NAME);
++        const moved = Object.keys(rebranded).filter((entry) => !Object.hasOwn(catalog, entry));
++        expect(moved).toHaveLength(named.length);
++      }
++    },
++  );
++});
+diff --git a/scripts/lib/catgirl-branding.ts b/scripts/lib/catgirl-branding.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..19e3f773885db65071f283c122c267ae2e12db8a
+--- /dev/null
++++ b/scripts/lib/catgirl-branding.ts
+@@ -0,0 +1,169 @@
++// @effect-diagnostics nodeBuiltinImport:off - Build plugin, runs before any Effect runtime.
++import * as NodeFS from "node:fs";
++import * as NodeModule from "node:module";
++
++import type { Plugin } from "vite-plus";
++import type { PackUserConfig } from "vite-plus/pack";
++
++// Catgirl Code: the one place that names the product. The web, server and desktop builds rename
++// "T3 Code" and "T3 Connect" in what they bundle with the plugin below, and mobile through its
++// Babel plugin, so upstream's strings need no edits and new ones are covered too.
++// "T3 Chat" and other T3 products are upstream's own and stay. Tests run without the rename.
++
++// Upstream's own things keep their names wherever they are mentioned: its GitHub App, its GNOME
++// extension, and the label a link's session carries on the other machine.
++const KEPT_AFTER = "(?! for GitHub| SnapShots| · …)";
++// \s+ also covers a name that JSX text wraps across two lines.
++const NAME = new RegExp(`T3(\\s+)(Code|Connect)\\b${KEPT_AFTER}`, "g");
++// Translators also join the name into compounds ("T3-Code-Desktop-App") and inflect it ("T3 Codes CLI").
++const TRANSLATED_NAME = new RegExp(`T3([\\s-]+)(Code|Connect)(?=s?\\b)${KEPT_AFTER}`, "g");
++const CATALOG_FILE = /\/src\/i18n\/translations\/[^/]+\.json$/;
++
++/**
++ * Text that another program or an earlier install reads, by source file, kept as upstream wrote
++ * it. A unit test fails when an entry no longer matches its file.
++ */
++export const KEPT_TEXT: ReadonlyArray<readonly [file: string, ...text: ReadonlyArray<string>]> = [
++  // The linked machine strips this prefix from the session's label.
++  ["apps/server/src/peer/PeerLinks.ts", '"T3 Code · "'],
++  // Providers allowlist clients by name (see antigravityClientInfo).
++  ["apps/server/src/provider/CodexProvider.ts", 'CODEX_CLIENT_NAME = "T3 Code"'],
++  ["apps/server/src/provider/CodexChatGptAuth.ts", 'agent_name_hint: "T3 Code"'],
++  ["apps/server/src/provider/acp/AntigravityAcpSupport.ts", 'title: "T3 Code"'],
++  ["packages/provider-muse/src/server/sdk.ts", 'title: "T3 Code"'],
++  // The MCP server's protocol name, beside the `t3-code` its tools carry.
++  ["apps/server/src/mcp/McpHttpServer.ts", 'name: "T3 Code"'],
++  // Git identities, paired with upstream's addresses.
++  [
++    "apps/server/src/vcs/GitVcsDriver.ts",
++    'GIT_AUTHOR_NAME: "T3 Code"',
++    'GIT_COMMITTER_NAME: "T3 Code"',
++  ],
++  [
++    "packages/source-control-github/src/server/githubStackRebase.ts",
++    'GIT_CONFIG_VALUE_1: "T3 Code"',
++  ],
++  // Files and folders that earlier installs left on disk.
++  ["apps/desktop/src/app/DesktopCliShim.ts", '"Written by T3 Code:'],
++  ["apps/desktop/src/app/DesktopLegacyLocalStorage.ts", '"T3 Code (Alpha)"'],
++  [
++    "apps/desktop/src/app/DesktopUserData.ts",
++    'legacy: "T3 Code (Dev)"',
++    'legacy: "T3 Code (Alpha)"',
++  ],
++];
++
++type Catalog = Readonly<Record<string, unknown>>;
++type HashSource = (input: { readonly source: unknown; readonly dataFormat: string }) => string;
++
++const escapeRegExp = (text: string) => text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
++
++const keptIn = (file: string): ReadonlyArray<string> =>
++  KEPT_TEXT.filter(([suffix]) => file.endsWith(`/${suffix}`)).flatMap(([, ...text]) => text);
++
++const renameIn = (value: unknown, name: RegExp): unknown => {
++  if (typeof value === "string") return value.replace(name, "Catgirl$1$2");
++  if (Array.isArray(value)) return value.map((item) => renameIn(item, name));
++  if (typeof value !== "object" || value === null) return value;
++  return Object.fromEntries(
++    Object.entries(value).map(([key, item]) => [key, renameIn(item, name)]),
++  );
++};
++
++/** Renames the product in text. With the source `file` it came from, that file's kept text stays. */
++export const renameProduct = (code: string, file = ""): string => {
++  const kept = keptIn(file.replaceAll("\\", "/"));
++  if (kept.length === 0) return code.replace(NAME, "Catgirl$1$2");
++  // Kept text comes first, so it wins where both start at the same place.
++  const pattern = new RegExp(`${kept.map(escapeRegExp).join("|")}|${NAME.source}`, "g");
++  return code.replace(pattern, (match: string, space?: string, word?: string) =>
++    word === undefined ? match : `Catgirl${space}${word}`,
++  );
++};
++
++/**
++ * A translation is found by a hash of its English text, and the rename changes that text. So an
++ * entry whose English names the product moves to the hash of the renamed English.
++ */
++export function rebrandCatalog(
++  catalog: Catalog,
++  english: Catalog,
++  hashSource: HashSource,
++  onUnknownKey: (key: string) => void = () => {},
++): Catalog {
++  const rebranded: Record<string, unknown> = {};
++  for (const [key, translation] of Object.entries(catalog)) {
++    const source = english[key];
++    const renamedSource = renameIn(source, NAME);
++    let renamedKey = key;
++    if (JSON.stringify(renamedSource) !== JSON.stringify(source)) {
++      const dataFormat = ["ICU", "JSX"].find(
++        (format) => hashSource({ source, dataFormat: format }) === key,
++      );
++      if (dataFormat === undefined) onUnknownKey(key);
++      else renamedKey = hashSource({ source: renamedSource, dataFormat });
++    }
++    rebranded[renamedKey] = renameIn(translation, TRANSLATED_NAME);
++  }
++  return rebranded;
++}
++
++/** Rewrites one app's catalog file, given its text; `onUnknownKey` hears what it cannot re-key. */
++export function rebrandCatalogFile(
++  file: string,
++  text: string,
++  hashSource: HashSource,
++  onUnknownKey?: (key: string) => void,
++): string {
++  const english: Catalog = JSON.parse(
++    NodeFS.readFileSync(file.replace(/[^/\\]+\.json$/, "en.json"), "utf8"),
++  );
++  return JSON.stringify(rebrandCatalog(JSON.parse(text), english, hashSource, onUnknownKey));
++}
++
++// The GT library's own hash, from the package the app's GT library depends on, so keys match what
++// the app computes. `from` is any file of the app: web has gt-react, mobile gt-react-native,
++// the desktop main process gt-i18n.
++export function loadHashSource(from: string): HashSource {
++  const requireFromApp = NodeModule.createRequire(from);
++  const library = ["gt-react", "gt-react-native", "gt-i18n"].flatMap((name) => {
++    try {
++      return [requireFromApp.resolve(name)];
++    } catch {
++      return [];
++    }
++  })[0];
++  if (library === undefined) throw new Error(`No GT library resolves from ${from}.`);
++  const requireFromGT = NodeModule.createRequire(library);
++  return (requireFromGT("generaltranslation/id") as { readonly hashSource: HashSource }).hashSource;
++}
++
++/** The rename as a build plugin: Vite for the web client, Rolldown for `vp pack` bundles. */
++export function catgirlBrandingPlugin(): Plugin {
++  let hashSource: HashSource | undefined;
++  return {
++    name: "catgirl:branding",
++    enforce: "pre",
++    transform(code, id) {
++      const file = (id.split("?")[0] ?? id).replaceAll("\\", "/");
++      if (file.includes("/node_modules/")) return null;
++      if (CATALOG_FILE.test(file)) {
++        hashSource ??= loadHashSource(file);
++        const rebranded = rebrandCatalogFile(file, code, hashSource, (key) =>
++          this.warn(`${file}: ${key} keeps its English text; its hash is not reproducible`),
++        );
++        return { code: rebranded, map: null };
++      }
++      if (!/\.[cm]?[jt]sx?$/.test(file)) return null;
++      const renamed = renameProduct(code, file);
++      return renamed === code ? null : { code: renamed, map: null };
++    },
++  };
++}
++
++/** Adds the rename to every bundle of a `vp pack` config. */
++export const withCatgirlBranding = (builds: ReadonlyArray<PackUserConfig>): PackUserConfig[] =>
++  builds.map((build) => ({
++    ...build,
++    plugins: [catgirlBrandingPlugin(), ...[build.plugins ?? []].flat()],
++  }));
